@@ -30,6 +30,10 @@ services:
       REEL_AF_TTS_MODEL: ${REEL_AF_TTS_MODEL:-google/gemini-3.1-flash-tts-preview}
       REEL_AF_IMAGE_MODEL: ${REEL_AF_IMAGE_MODEL:-openrouter/google/gemini-2.5-flash-image}
       REEL_AF_VIDEO_MODEL: ${REEL_AF_VIDEO_MODEL:-openrouter/google/veo-3.1-lite}
+      # Plan de fin (outro logo Bon Stock). Fond vide = auto (épouse le logo).
+      REEL_AF_OUTRO_S: ${REEL_AF_OUTRO_S:-2.0}
+      REEL_AF_OUTRO_BG: ${REEL_AF_OUTRO_BG:-}
+      REEL_AF_LOGO: ${REEL_AF_LOGO:-}
       PORT: ${PORT:-8002}
     ports:
       - "${AGENT_NODE_PORT:-8002}:8002"

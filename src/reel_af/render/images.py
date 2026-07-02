@@ -102,11 +102,16 @@ async def generate_first_frame(
     final_path = out_dir / f"frame-{idx:02d}.jpg"
 
     augmented = _augment(image_prompt, content_mode)
-    images = await provider.generate_image(
+    result = await provider.generate_image(
         prompt=augmented,
         model=IMAGE_MODEL,
         n=1,
     )
+    # Le SDK renvoie un objet MultimodalResponse dont les images sont dans
+    # l'attribut `.images` (et non une liste directement — d'où le bug
+    # "'MultimodalResponse' object is not subscriptable"). On gère aussi le
+    # cas où une autre version renverrait déjà une liste.
+    images = getattr(result, "images", result)
     if not images:
         raise RuntimeError(
             f"generate_first_frame: image gen returned no images for beat {idx}"

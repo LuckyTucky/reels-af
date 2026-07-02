@@ -371,17 +371,6 @@ async def stitch_reel(
 
 
 # ════════════════════════════════════════════════════════════════════
-# STABILITÉ — un seul reel rendu à la fois (verrou global du moteur)
-# ════════════════════════════════════════════════════════════════════
-# Peu importe COMMENT un reel est lancé (reel.sh, bouton 🎬, script, ou
-# plusieurs commandes d'un coup), le moteur n'en traite qu'UN à la fois : les
-# autres attendent leur tour ici. Fini les rendus parallèles qui se ralentissent
-# mutuellement et saturent le modèle. C'est la garantie de stabilité, au niveau
-# du moteur plutôt que de la méthode de lancement.
-_REEL_RENDER_LOCK = asyncio.Semaphore(1)
-
-
-# ════════════════════════════════════════════════════════════════════
 # ENTRY REASONER 1 — Article → Reel
 # ════════════════════════════════════════════════════════════════════
 
@@ -395,9 +384,6 @@ async def article_to_reel(
     Composes the DAG via ``app.call`` so every phase is a visible node
     in the control plane and individually re-runnable.
 
-    Un seul reel se rend à la fois (verrou global _REEL_RENDER_LOCK) :
-    les lancements simultanés sont sérialisés par le moteur.
-
     Example:
       curl -X POST http://localhost:8080/api/v1/execute/async/reel-af.reel_article_to_reel \\
         -H 'Content-Type: application/json' \\
@@ -405,11 +391,7 @@ async def article_to_reel(
     """
     if "OPENROUTER_API_KEY" not in os.environ:
         return {"error": "OPENROUTER_API_KEY not set in env."}
-    async with _REEL_RENDER_LOCK:
-        return await _article_to_reel_locked(url, out_dir)
 
-
-async def _article_to_reel_locked(url: str, out_dir: str | None = None) -> dict:
     run_id = uuid.uuid4().hex[:8]
     out_path = (
         Path(out_dir) if out_dir else (Path.cwd() / "output" / f"article-{run_id}")
@@ -510,11 +492,7 @@ async def topic_to_reel(
     """
     if "OPENROUTER_API_KEY" not in os.environ:
         return {"error": "OPENROUTER_API_KEY not set in env."}
-    async with _REEL_RENDER_LOCK:
-        return await _topic_to_reel_locked(topic, out_dir)
 
-
-async def _topic_to_reel_locked(topic: str, out_dir: str | None = None) -> dict:
     run_id = uuid.uuid4().hex[:8]
     out_path = (
         Path(out_dir) if out_dir else (Path.cwd() / "output" / f"topic-{run_id}")

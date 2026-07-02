@@ -24,13 +24,6 @@ COPY src/ /app/src/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache .
 
-# Navigateur headless (Chromium) + ses dépendances système, pour lire les
-# pages verrouillées par JavaScript (repli de l'extraction d'article).
-# Installé dans /opt pour être visible par l'utilisateur "python" à l'exécution.
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN python -m playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy the rest of the project (entry shim, scripts).
 COPY . /app/
 

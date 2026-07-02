@@ -31,10 +31,27 @@ composite = a 1-10 number reflecting OVERALL viral pick — not a literal
 average. A claim that's 10/10 novel but 4/10 narratable scores 6-7,
 not 9. You're picking what will WORK on screen.
 
-Then pick the top 3 indices. CRITICAL: prefer DIVERSITY across hunter
-angles. If specific_figure had the top 2, the third pick should be a
-non-specific_figure candidate even if its composite is slightly lower.
-Three same-flavored claims make a boring reel run.
+═══ SUBJECT-CENTRALITY GATE — CHECK THIS FIRST, BEFORE SCORING ═══
+The TOPIC's subject must be the PROTAGONIST of the claim: it must own
+the hook AND land in the payoff. A claim where the subject is only a
+TRIGGER or a doorway to a DIFFERENT subject FAILS this gate.
+
+  Example — topic "cannabis and sleep":
+    • PASSES: "cannabis suppresses REM in the first half of the night"
+      (cannabis is the actor; the claim is about what cannabis DOES).
+    • FAILS: a claim whose real subject is REM cycles, dreams, jazz
+      pianists, or muscle memory, with cannabis as a mere footnote.
+
+Any candidate that fails the gate: force its composite to ≤ 3 and DO
+NOT put it in chosen_indices, no matter how novel or hookable. Off-
+subject virality is worse than useless — it produces a reel that never
+mentions what the viewer came for.
+
+Then pick the top 3 indices FROM THE CANDIDATES THAT PASS THE GATE.
+Among those, prefer DIVERSITY across hunter angles: if specific_figure
+had the top 2, the third pick should be a different angle even if its
+composite is slightly lower. Three same-flavored claims make a boring
+reel run — but NEVER reach for an off-subject candidate to get variety.
 
 If you genuinely think only 1-2 candidates are worth narrating, return
 just those. Quality over quantity.

@@ -1,0 +1,19 @@
+# ===========================================================================
+#  MES REELS À FAIRE — une URL par ligne
+# ===========================================================================
+#  • Colle ici les URLs des nouvelles que tu veux transformer en reels.
+#  • Une seule URL par ligne.
+#  • Pour "décocher" une nouvelle sans l'effacer : mets un # devant sa ligne.
+#  • Les lignes vides et celles qui commencent par # sont ignorées.
+#
+#  Ensuite, depuis le dossier reels-af :
+#        bash reels_a_la_chaine.sh
+#  → elles seront traitées UNE PAR UNE (pas en parallèle).
+#
+#  Astuce : évite les liens « news.google.com/rss/… » (redirections encodées,
+#  souvent inexploitables) — prends l'URL du vrai article.
+# ===========================================================================
+
+# Exemples (retire le # devant une ligne pour l'activer) :
+# https://cannabisifokus.se/glass-house-skriver-historia-blir-usas-andra-cannabisbolag-pa-new-york-borsen/
+# https://cannabisifokus.se/den-skunkiga-doften-kan-bli-nasta-genombrott-marijuana-terpener-visar-lovande-resultat-mot-fibromyalgi/

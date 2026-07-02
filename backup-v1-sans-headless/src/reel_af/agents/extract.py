@@ -58,20 +58,6 @@ Rules:
 Stay faithful. Don't invent examples. Don't soften surprising claims. Pick the one thing in this article that, stated as a thumbnail, would make a stranger tap."""
 
 
-# Signes qu'un simple téléchargement HTTP n'a PAS obtenu l'article : la page
-# exige JavaScript, ou renvoie une page de redirection/anti-robot quasi vide.
-_JS_GATE_MARKERS = (
-    "javascript is required",
-    "enable javascript",
-    "please enable js",
-    "requires javascript",
-    "you are being redirected",
-    "checking your browser",
-    "cf-browser-verification",
-    "just a moment",
-)
-
-
 async def _fetch(url: str) -> tuple[str, str]:
     """Fetch URL, return (raw_html, final_url)."""
     url = _resolve_google_news(url)
@@ -88,36 +74,6 @@ async def _fetch(url: str) -> tuple[str, str]:
             return text, str(resp.url)
 
 
-async def _fetch_rendered(url: str) -> tuple[str, str]:
-    """Repli : charge la page dans un vrai navigateur (Chromium headless) qui
-    EXÉCUTE le JavaScript, puis renvoie le HTML rendu. Gère les pages
-    JS-gated et suit nativement les redirections Google News."""
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
-        )
-        try:
-            page = await browser.new_page(user_agent=USER_AGENT, locale="en-US")
-            await page.goto(
-                url, wait_until="domcontentloaded",
-                timeout=int(FETCH_TIMEOUT_S * 1000),
-            )
-            # Laisse le JS peupler le contenu (best-effort, on n'échoue pas dessus).
-            try:
-                await page.wait_for_load_state(
-                    "networkidle", timeout=int(FETCH_TIMEOUT_S * 1000)
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            html = await page.content()
-            final = page.url
-            return html, final
-        finally:
-            await browser.close()
-
-
 def _clean(html: str) -> tuple[str, str]:
     """Run readability for clean title + body. Pure CPU."""
     doc = Document(html)
@@ -130,51 +86,18 @@ def _clean(html: str) -> tuple[str, str]:
     return title, text
 
 
-def _insuffisant(title: str, body: str) -> bool:
-    """Vrai si l'extraction HTTP simple n'a manifestement pas récupéré l'article
-    (corps vide/trop court, ou message « activez JavaScript » / anti-robot)."""
-    if len(body) < 200:
-        return True
-    t = f"{title} {body}".lower()
-    return any(m in t for m in _JS_GATE_MARKERS)
-
-
 async def extract_essence(app: Any, url: str) -> Essence:
     """Single harness: fetch the article, extract the most surprising
-    claim + mechanism + evidence + content_mode + domain.
-
-    Chemin rapide : téléchargement HTTP + readability. Si la page est vide ou
-    verrouillée par JavaScript, on bascule automatiquement sur un navigateur
-    headless (Chromium) qui exécute le JS, puis on ré-extrait."""
-    loop = asyncio.get_event_loop()
-    final_url = url
-    try:
-        html, final_url = await _fetch(url)
-        title, body = await loop.run_in_executor(None, _clean, html)
-    except Exception:  # noqa: BLE001
-        # Le téléchargement HTTP a échoué (403/anti-robot, timeout, réseau…).
-        # On force le repli navigateur headless ci-dessous.
-        title, body = "", ""
-
-    if _insuffisant(title, body):
-        # Repli navigateur headless : exécute le JS ET présente une vraie
-        # empreinte de navigateur — contourne souvent les blocages 403 et
-        # les pages « activez JavaScript ».
-        try:
-            html, final_url = await _fetch_rendered(url)
-            title, body = await loop.run_in_executor(None, _clean, html)
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(
-                f"Extraction impossible depuis {url} : la page est bloquée "
-                f"(anti-robot) ou exige JavaScript, et le navigateur headless "
-                f"a aussi échoué ({exc}). Essaie l'URL directe de l'article."
-            )
+    claim + mechanism + evidence + content_mode + domain."""
+    html, final_url = await _fetch(url)
+    title, body = await asyncio.get_event_loop().run_in_executor(None, _clean, html)
 
     if not body:
         raise RuntimeError(
-            f"Impossible d'extraire un texte lisible depuis {final_url}, "
-            "même avec le navigateur headless. La page n'a peut-être pas de "
-            "véritable article. Essaie l'URL directe de l'article."
+            f"Impossible d'extraire un texte lisible depuis {final_url}. "
+            "La page est peut-être protégée, dynamique (JS) ou sans véritable "
+            "article. Essaie l'URL directe de l'article (évite les liens "
+            "Google News RSS)."
         )
 
     user = (

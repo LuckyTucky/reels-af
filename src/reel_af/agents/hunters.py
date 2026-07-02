@@ -40,6 +40,19 @@ If your candidate fits any of these patterns, scrap it and try again.
 """
 
 
+_SUBJECT_CENTRAL = """
+SUBJECT-CENTRALITY (non-negotiable — overrides the hunt for novelty):
+The TOPIC's subject must be the PROTAGONIST of every candidate. It must
+own the core_claim, drive the mechanism, AND land in the payoff — it is
+NOT a doorway to a different subject. For a topic like "cannabis and
+sleep", the claim must be about what CANNABIS does; a claim whose real
+subject is REM cycles, dreams, jazz pianists, or muscle memory — with
+cannabis as a footnote — is DEAD, however novel. Even a cross-domain
+bridge must keep the subject as the actor, not hand the story to the
+other field.
+"""
+
+
 _OUTPUT_SHAPE = """
 OUTPUT: exactly 3 EssenceCandidates. Each:
   • core_claim       — ≤25 words, specific (named entity / specific
@@ -80,6 +93,7 @@ BAD examples:
   • "Plato, 380 BCE" (overdone)
 
 {_ANTI_CLICHE}
+{_SUBJECT_CENTRAL}
 {_OUTPUT_SHAPE}
 """
 
@@ -105,6 +119,7 @@ BAD examples:
   • "Most people don't realize X" without naming the source
 
 {_ANTI_CLICHE}
+{_SUBJECT_CENTRAL}
 {_OUTPUT_SHAPE}
 """
 
@@ -131,6 +146,7 @@ BAD:
   • "In 1969, humans landed on the moon" (overdone)
 
 {_ANTI_CLICHE}
+{_SUBJECT_CENTRAL}
 {_OUTPUT_SHAPE}
 """
 
@@ -157,6 +173,7 @@ BAD:
   • "Philosophy is connected to all other fields" (vague)
 
 {_ANTI_CLICHE}
+{_SUBJECT_CENTRAL}
 {_OUTPUT_SHAPE}
 """
 

@@ -22,6 +22,7 @@ timing and it avoids a second ffmpeg pass.
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 import shutil
 import subprocess
@@ -37,6 +38,45 @@ from reel_af.render.subtitles import (
 TARGET_W = CANVAS_W
 TARGET_H = CANVAS_H
 FPS = 30  # match Veo's native 24-30 fps to skip interpolation.
+
+# ───── Bon Stock outro (logo end card) ───────────────────────────────
+# Plan de fin : logo Bon Stock centré ~2 s. Ne se déclenche que si un
+# fichier logo existe (sinon le reel se produit exactement comme avant).
+OUTRO_DURATION_S = float(os.getenv("REEL_AF_OUTRO_S", "2.0"))
+# Fond de l'outro : None = automatique (épouse le fond du logo). Une valeur
+# explicite (ex. "white", "black", "0x0b3d2e") force ce fond.
+_OUTRO_BG_ENV = os.getenv("REEL_AF_OUTRO_BG") or None
+
+
+def _outro_background(logo: Path) -> str:
+    """Couleur de fond de l'outro. Choix explicite (REEL_AF_OUTRO_BG) sinon
+    on épouse le fond du logo : logo à fond plein → couleur de son coin (rendu
+    sans bord visible) ; logo détouré (transparent) → noir (il flotte)."""
+    if _OUTRO_BG_ENV:
+        return _OUTRO_BG_ENV
+    try:
+        from PIL import Image
+        im = Image.open(logo).convert("RGBA")
+        r, g, b, a = im.getpixel((1, 1))
+        if a >= 128:  # coin opaque → c'est le fond du logo
+            return f"0x{r:02x}{g:02x}{b:02x}"
+    except Exception:  # noqa: BLE001
+        pass
+    return "black"
+
+
+def _logo_path() -> Path | None:
+    """Chemin du logo Bon Stock, ou None si absent.
+
+    Priorité à la variable d'env REEL_AF_LOGO ; sinon bon-stock/logo.png
+    à la racine du dépôt."""
+    env = os.getenv("REEL_AF_LOGO", "").strip()
+    if env:
+        p = Path(env)
+        return p if p.exists() else None
+    # stitch.py = <repo>/src/reel_af/render/stitch.py → parents[3] = <repo>
+    default = Path(__file__).resolve().parents[3] / "bon-stock" / "logo.png"
+    return default if default.exists() else None
 
 
 # ───── Font discovery ────────────────────────────────────────────────
@@ -159,6 +199,55 @@ async def _render_beat(
         )
 
 
+# ───── Outro logo (Bon Stock end card) ───────────────────────────────
+
+
+async def _render_outro(
+    logo: Path,
+    out_path: Path,
+    duration: float = OUTRO_DURATION_S,
+) -> None:
+    """Rend un plan de fin SILENCIEUX 1080×1920 : logo centré sur fond,
+    avec un léger fondu d'entrée. Mêmes réglages codec que les plans de
+    beat pour se concaténer proprement."""
+    # Boîte de sécurité pour le logo : ~62% de largeur, ~42% de hauteur,
+    # ratio préservé (le logo n'est jamais déformé).
+    box_w = int(TARGET_W * 0.62)
+    box_h = int(TARGET_H * 0.42)
+    bg = _outro_background(logo)
+    filter_complex = (
+        f"[1:v]scale={box_w}:{box_h}:force_original_aspect_ratio=decrease[lg];"
+        f"[0:v][lg]overlay=(W-w)/2:(H-h)/2:format=auto,"
+        f"fade=t=in:st=0:d=0.4,setsar=1,format=yuv420p[v]"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "lavfi",
+        "-i", f"color=c={bg}:s={TARGET_W}x{TARGET_H}:d={duration:.3f}:r={FPS}",
+        "-i", str(logo),
+        "-filter_complex", filter_complex,
+        "-map", "[v]", "-an",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-preset", "fast", "-crf", "18",
+        "-r", str(FPS),
+        "-t", f"{duration:.3f}",
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"stitch: outro logo render failed (exit {proc.returncode}):\n"
+            f"  cmd: {' '.join(shlex.quote(c) for c in cmd)}\n"
+            f"  stderr: {stderr.decode(errors='replace')[-800:]}"
+        )
+
+
 # ───── Single-pass final assembly ────────────────────────────────────
 
 
@@ -178,25 +267,35 @@ async def _single_pass_assemble(
     font_dir_arg = _ffmpeg_path_arg(Path(font_path).parent)
 
     concat_inputs = "".join(f"[{i}:v]" for i in range(n))
+    audio_idx = n
+
+    # Durée totale de la vidéo = somme des plans (beats + éventuel outro).
+    # On la calcule pour FORCER la longueur de sortie avec -t : c'est
+    # déterministe. (Le vieux réflexe -shortest ne fonctionne pas ici : avec
+    # apad, l'audio devient "infini" et -shortest ne coupe pas.)
+    total_v = sum(_probe_duration(c) for c in clip_paths)
+
+    # apad garde une piste audio continue (silence après la narration) jusqu'à
+    # la fin du plan d'outro ; -t fixe la durée exacte du reel.
     filter_complex = (
         f"{concat_inputs}concat=n={n}:v=1:a=0[concat];"
-        f"[concat]subtitles={ass_arg}:fontsdir={font_dir_arg}[v]"
+        f"[concat]subtitles={ass_arg}:fontsdir={font_dir_arg}[v];"
+        f"[{audio_idx}:a]apad[aout]"
     )
 
     cmd: list[str] = ["ffmpeg", "-y", "-loglevel", "error"]
     for clip in clip_paths:
         cmd += ["-i", str(clip)]
-    audio_idx = n
     cmd += ["-i", str(audio_path)]
     cmd += [
         "-filter_complex", filter_complex,
         "-map", "[v]",
-        "-map", f"{audio_idx}:a",
+        "-map", "[aout]",
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-preset", "fast", "-crf", "18",
         "-r", str(FPS),
         "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
-        "-shortest",
+        "-t", f"{total_v:.3f}",
         "-movflags", "+faststart",
         str(out_path),
     ]
@@ -285,6 +384,13 @@ async def stitch_reel(
             )
         )
     await asyncio.gather(*render_jobs)
+
+    # Step 2 bis — plan de fin (outro) avec le logo Bon Stock, si présent.
+    logo = _logo_path()
+    if logo is not None:
+        outro_clip = out_dir / "outro-logo.mp4"
+        await _render_outro(logo, outro_clip)
+        clip_paths.append(outro_clip)
 
     # Step 3 — single ffmpeg invocation.
     final = out_dir / "reel.mp4"

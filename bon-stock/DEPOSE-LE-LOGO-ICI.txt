@@ -1,0 +1,12 @@
+Dépose ton logo Bon Stock dans ce dossier, nommé exactement :
+
+    logo.png
+
+(PNG à fond transparent de préférence, bonne résolution.)
+
+Le montage des reels le prendra automatiquement pour le plan de fin (outro ~2 s).
+Une fois le logo déposé, il faudra reconstruire l'image Docker :
+
+    cd ~/Claude/Projects/reels-af && docker compose build reel-af && docker compose up -d reel-af
+
+Tu peux supprimer ce fichier une fois le logo en place.
