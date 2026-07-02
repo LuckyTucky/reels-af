@@ -34,6 +34,11 @@ services:
       REEL_AF_OUTRO_S: ${REEL_AF_OUTRO_S:-2.0}
       REEL_AF_OUTRO_BG: ${REEL_AF_OUTRO_BG:-}
       REEL_AF_LOGO: ${REEL_AF_LOGO:-}
+      # Signature vocale de fin (« Bon Stock loves cannabis! »).
+      REEL_AF_SIGNATURE: ${REEL_AF_SIGNATURE:-1}
+      REEL_AF_SIGNATURE_TEXT: ${REEL_AF_SIGNATURE_TEXT:-}
+      REEL_AF_SIGNATURE_VOICE: ${REEL_AF_SIGNATURE_VOICE:-Kore}
+      REEL_AF_SIGNATURE_BG_VOLUME: ${REEL_AF_SIGNATURE_BG_VOLUME:-0.35}
       PORT: ${PORT:-8002}
     ports:
       - "${AGENT_NODE_PORT:-8002}:8002"

@@ -65,6 +65,78 @@ def _outro_background(logo: Path) -> str:
     return "black"
 
 
+# ───── Signature vocale de fin (voix off sur le logo) ────────────────
+# Le texte inclut une indication de jeu entre crochets : la voix Gemini
+# l'interprète mais NE la prononce PAS. Ton visé : complice et souriant,
+# comme une amie qui te glisse ça à l'oreille — pas une annonce claironnée.
+SIGNATURE_TEXT = (
+    os.getenv("REEL_AF_SIGNATURE_TEXT")
+    or "[warm, playful, with a smile in the voice, like sharing a happy little "
+    "secret with a close friend] Bon Stock loves cannabis!"
+)
+# Voix Gemini féminine chaleureuse et amicale, constante d'un reel à l'autre.
+SIGNATURE_VOICE = os.getenv("REEL_AF_SIGNATURE_VOICE") or "Aoede"
+
+
+def _bonstock_file(basenames: tuple[str, ...]) -> Path | None:
+    """Cherche un fichier bon-stock/<nom>.<ext>, INSENSIBLE À LA CASSE
+    (Linux distingue « Indicatif.wav » de « indicatif.wav » ; pas nous)."""
+    root = Path(__file__).resolve().parents[3] / "bon-stock"
+    if not root.is_dir():
+        return None
+    wanted = {b.lower() for b in basenames}
+    exts = {"wav", "mp3", "m4a", "aac", "ogg"}
+    for p in sorted(root.iterdir()):
+        if (
+            p.is_file()
+            and p.stem.lower() in wanted
+            and p.suffix.lower().lstrip(".") in exts
+        ):
+            return p
+    return None
+
+
+def _signature_provided() -> Path | None:
+    """Fichier de signature vocale fourni par l'utilisateur (prioritaire)."""
+    return _bonstock_file(("signature",))
+
+
+def _background_audio() -> Path | None:
+    """Indicatif sonore de fond (jingle) fourni par l'utilisateur, joué sous
+    la voix pendant l'outro. Optionnel : None si absent."""
+    return _bonstock_file(("indicatif", "jingle"))
+
+
+async def _signature_audio(cache_dir: Path) -> Path | None:
+    """Audio de « Bon Stock loves cannabis! ».
+
+    1) Fichier fourni (bon-stock/signature.*) prioritaire ;
+    2) sinon génération UNE FOIS via le TTS (voix féminine fixe), mise en
+       cache et réutilisée pour tous les reels suivants ;
+    Désactivable avec REEL_AF_SIGNATURE=0. Renvoie None si indisponible —
+    l'outro reste alors silencieux (jamais d'échec du reel)."""
+    prov = _signature_provided()
+    if prov is not None:
+        return prov
+    if os.getenv("REEL_AF_SIGNATURE", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    cache = cache_dir / ".bonstock-signature.wav"
+    if cache.exists() and cache.stat().st_size > 1000:
+        return cache
+    try:
+        from reel_af.render.tts import synthesize_audio_single
+        path, _dur = await synthesize_audio_single(
+            narration=SIGNATURE_TEXT,
+            voice=SIGNATURE_VOICE,
+            out_dir=cache_dir / ".sig-tmp",
+        )
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(Path(path).read_bytes())
+        return cache
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _logo_path() -> Path | None:
     """Chemin du logo Bon Stock, ou None si absent.
 
@@ -257,8 +329,16 @@ async def _single_pass_assemble(
     ass_path: Path,
     font_path: str,
     out_path: Path,
+    signature_audio: Path | None = None,
+    outro_start_s: float | None = None,
+    background_audio: Path | None = None,
 ) -> None:
-    """One ffmpeg call: concat filter + libass burn + AAC mux."""
+    """One ffmpeg call: concat filter + libass burn + AAC mux.
+
+    Si signature_audio + outro_start_s sont fournis, la signature vocale est
+    mixée dans la bande-son À PARTIR de outro_start_s (l'instant où le logo
+    apparaît). Si background_audio est fourni, un indicatif sonore joue SOUS
+    la voix (volume réduit) sur la même fenêtre."""
     n = len(clip_paths)
     if n == 0:
         raise RuntimeError("stitch: no clips to assemble.")
@@ -275,18 +355,46 @@ async def _single_pass_assemble(
     # apad, l'audio devient "infini" et -shortest ne coupe pas.)
     total_v = sum(_probe_duration(c) for c in clip_paths)
 
-    # apad garde une piste audio continue (silence après la narration) jusqu'à
-    # la fin du plan d'outro ; -t fixe la durée exacte du reel.
+    use_sig = signature_audio is not None and outro_start_s is not None
+    use_bg = use_sig and background_audio is not None
+    if use_sig:
+        # Narration + signature vocale (+ éventuel indicatif) retardées jusqu'à
+        # l'apparition du logo, puis mixées.
+        delay_ms = max(0, int(outro_start_s * 1000))
+        sig_idx = n + 1
+        parts = [f"[{sig_idx}:a]adelay={delay_ms}|{delay_ms}[sig]"]
+        mix_labels = [f"[{audio_idx}:a]", "[sig]"]
+        if use_bg:
+            bg_idx = n + 2
+            bg_vol = os.getenv("REEL_AF_SIGNATURE_BG_VOLUME") or "0.35"
+            parts.append(
+                f"[{bg_idx}:a]adelay={delay_ms}|{delay_ms},volume={bg_vol}[jin]"
+            )
+            mix_labels.append("[jin]")
+        audio_graph = (
+            ";".join(parts) + ";"
+            + "".join(mix_labels)
+            + f"amix=inputs={len(mix_labels)}:duration=longest:normalize=0[aout]"
+        )
+    else:
+        # apad garde une piste audio continue (silence après la narration)
+        # jusqu'à la fin du plan d'outro ; -t fixe la durée exacte du reel.
+        audio_graph = f"[{audio_idx}:a]apad[aout]"
+
     filter_complex = (
         f"{concat_inputs}concat=n={n}:v=1:a=0[concat];"
         f"[concat]subtitles={ass_arg}:fontsdir={font_dir_arg}[v];"
-        f"[{audio_idx}:a]apad[aout]"
+        f"{audio_graph}"
     )
 
     cmd: list[str] = ["ffmpeg", "-y", "-loglevel", "error"]
     for clip in clip_paths:
         cmd += ["-i", str(clip)]
     cmd += ["-i", str(audio_path)]
+    if use_sig:
+        cmd += ["-i", str(signature_audio)]
+    if use_bg:
+        cmd += ["-i", str(background_audio)]
     cmd += [
         "-filter_complex", filter_complex,
         "-map", "[v]",
@@ -385,12 +493,26 @@ async def stitch_reel(
         )
     await asyncio.gather(*render_jobs)
 
-    # Step 2 bis — plan de fin (outro) avec le logo Bon Stock, si présent.
+    # Durée cumulée des plans de narration = instant où le logo apparaîtra.
+    # La signature vocale démarrera pile à cet instant.
+    beats_total = sum(_probe_duration(c) for c in clip_paths)
+
+    # Step 2 bis — plan de fin (outro) : logo Bon Stock + signature vocale.
     logo = _logo_path()
+    signature: Path | None = None
+    background: Path | None = None
+    outro_start: float | None = None
     if logo is not None:
+        signature = await _signature_audio(out_dir.parent)
+        background = _background_audio() if signature else None
+        sig_dur = _probe_duration(signature) if signature else 0.0
+        # L'outro dure au moins OUTRO_DURATION_S, et assez pour ne pas couper
+        # la voix (durée de la signature + petite marge).
+        outro_dur = max(OUTRO_DURATION_S, sig_dur + 0.3) if sig_dur else OUTRO_DURATION_S
         outro_clip = out_dir / "outro-logo.mp4"
-        await _render_outro(logo, outro_clip)
+        await _render_outro(logo, outro_clip, duration=outro_dur)
         clip_paths.append(outro_clip)
+        outro_start = beats_total
 
     # Step 3 — single ffmpeg invocation.
     final = out_dir / "reel.mp4"
@@ -400,6 +522,9 @@ async def stitch_reel(
         ass_path=reel_ass,
         font_path=font_path,
         out_path=final,
+        signature_audio=signature,
+        outro_start_s=outro_start,
+        background_audio=background,
     )
     _ = run_id  # accepted for forward-compat / log correlation
     return final

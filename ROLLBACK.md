@@ -1,5 +1,22 @@
 # Reels-af — versions & retour arrière
 
+## ⭐ Point stable étiqueté : v1.3.0-stable (2026-07-02)
+
+Version de référence, testée et validée : extraction headless (JavaScript + blocages
+403), outro logo Bon Stock, et **sérialisation du moteur** (un seul reel rendu à la
+fois, quel que soit le mode de lancement). Sauvegardée comme commit Git étiqueté.
+
+**Revenir à cette version stable à tout moment :**
+
+```bash
+cd ~/Claude/Projects/reels-af
+git stash            # met de côté d'éventuelles modifs en cours (optionnel)
+git checkout v1.3.0-stable
+docker compose build reel-af && docker compose up -d reel-af
+```
+
+Pour repartir de l'avant après inspection : `git checkout main` (ou la branche de travail).
+
 ## Où on en est
 
 - **v1.0.0 (backup)** — extraction par téléchargement HTTP + readability.
