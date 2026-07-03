@@ -1,6 +1,6 @@
 # CLAUDE.md — brief du projet reels-af / Bon Stock
 
-*Contexte pour toute session d'assistant. Tenu à jour au fil du travail. Dernière révision : 2026-07-02.*
+*Contexte pour toute session d'assistant. Tenu à jour au fil du travail. Dernière révision : 2026-07-03.*
 
 ## Préférences de collaboration (Luc)
 
@@ -19,7 +19,7 @@
 
 **reels-af** : producteur de reels verticaux (1080×1920) « AI-native », bâti sur **AgentField**.
 **Bon Stock** : média québécois sur le cannabis légal (science, industrie, consommation).
-Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres karaoké, **outro logo**, et **signature vocale**.
+Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres karaoké, **intro/outro vidéo** (logo + indicatif), **transitions xfade aléatoires** entre plans, et **signature vocale**. Chaque rendu se termine par une **auto-vérification**.
 
 ## Comment ça tourne (crucial)
 
@@ -47,16 +47,18 @@ Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres
 - `agents/` — compose (script), hunters/critic/narrator/judge (mode sujet), visual, accent.
 - `render/tts.py` — TTS Gemini (phrase par phrase, timings karaoké). Voix par ton.
 - `render/images.py`, `render/video.py` — génération d'images + ken-burns / Veo.
-- `render/stitch.py` — assemblage final : clips de beats → concat + sous-titres (libass) + mux audio ; **outro logo** ; **signature vocale + indicatif** ; puis **auto-vérification**.
+- `render/stitch.py` — assemblage final : intro vidéo optionnelle → plans enchaînés par **fondus xfade** (transition piochée au hasard dans un pool, désactivable) ou coupes franches → sous-titres (libass, décalés si intro) + mux audio (indicatif au début/à la fin, narration au milieu, signature vocale sur l'outro) → **outro vidéo/logo** ; puis **auto-vérification**.
 - `render/verify.py` — auto-vérification post-rendu (voir plus bas).
+- `planning/beats.py` — découpe les plans les plus longs (8 s) en deux plans de 4 s pour plus de dynamisme (chacun sa propre image) ; désactivable via `REEL_AF_SPLIT_LONG_PLANS=0`.
 - `planning/` — beats, cards, safe_zone, font_metrics.
 - `app.py` — reasoners + points d'entrée (`article_to_reel`, `topic_to_reel`) + **le verrou de sérialisation**.
 
 ## Marque Bon Stock (`bon-stock/`)
 
 - `logo.png` → carte d'outro de fin. Le fond de l'outro s'**auto-adapte** : logo opaque → couleur de son coin ; logo transparent → noir.
+- `intro/`, `outro/` → vidéos de fond optionnelles piochées **au hasard** dans chaque dossier (sinon fond logo par défaut). Désactivables via `REEL_AF_INTRO=0` / `REEL_AF_OUTRO_VIDEO=0`.
 - Signature vocale **« Bon Stock loves cannabis! »** → TTS (voix **Aoede**), générée une fois et mise en cache dans `output/.bonstock-signature.wav`. Remplaçable par un fichier `bon-stock/signature.*` (prioritaire).
-- `Indicatif.wav` (jingle) → joue **sous** la voix pendant l'outro (recherche de fichier **insensible à la casse**).
+- `Indicatif.wav` (jingle) → joue **sous** la voix à l'intro **et** à l'outro (recherche de fichier **insensible à la casse**).
 - `MARQUE.md` — référence de marque + tous les knobs `.env`.
 
 ## Config (`.env`, lue par docker-compose ; ces réglages ne nécessitent PAS de reconstruction)
@@ -64,6 +66,9 @@ Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres
 - `REEL_AF_SIGNATURE` / `_TEXT` / `_VOICE` / `_BG_VOLUME` — réglage de la signature. Après changement :
   `rm -f output/.bonstock-signature.wav && docker compose up -d reel-af`.
 - `REEL_AF_OUTRO_S` / `_BG` / `_LOGO`.
+- `REEL_AF_INTRO` / `_INTRO_MAX_S` / `_INTRO_BG_VOLUME`, `REEL_AF_OUTRO_VIDEO` — intro/outro vidéo (0/1 pour désactiver, volume de l'indicatif en fond).
+- `REEL_AF_TRANSITIONS` (pool de transitions xfade, `none` pour désactiver) / `_TRANSITION_S` (durée du fondu).
+- `REEL_AF_SPLIT_LONG_PLANS` (`0` pour désactiver le découpage des plans de 8 s en 2×4 s).
 - `REEL_AF_USE_VEO` (`false` = ken-burns ~0,10 $/reel ; `true` = Veo ~1,20 $).
 - `.env` contient la clé OpenRouter → **ignoré par git** (ne jamais committer).
 
@@ -76,7 +81,7 @@ Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres
 5. **Ne PAS lancer git dans le dépôt monté depuis le sandbox/Cowork** : le décalage de permissions laisse des `.git/*.lock` que l'utilisateur doit `rm`. → **Préparer les commandes git pour que Luc les lance dans SON Terminal.**
 6. **Sérialisation** : un reel à la fois (verrou moteur). Ne pas se fier à la méthode de lancement.
 
-## Auto-vérification post-rendu (`render/verify.py`, v1.5.0)
+## Auto-vérification post-rendu (`render/verify.py`)
 
 À la fin de chaque rendu, vérifie : format 1080×1920, **piste audio présente et non silencieuse** (TTS raté), **pas d'écran noir** prolongé, durée plausible. Écrit `verification.json` dans le dossier du reel, et un **`PROBLEME.txt`** lisible **seulement si** un défaut est détecté. **Non bloquant.**
 
@@ -84,12 +89,12 @@ Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres
 
 - **v1.3.0-stable** — extraction headless (JS + 403), outro logo, sérialisation moteur.
 - **v1.4.0** — signature vocale + indicatif sonore.
-- **v1.5.0** — auto-vérification post-rendu.
+- **v1.8.0** (dernier tag ; les jalons v1.5–v1.7 n'ont pas été tagués séparément) — auto-vérification post-rendu (`verify.py`), intro/outro **vidéo** (en plus du logo statique) avec indicatif au début et à la fin, **transitions xfade aléatoires** entre plans, **découpage des plans longs** (8 s → 2×4 s) pour plus de dynamisme, **mode dev** (`docker-compose.override.yml`, montage `src/` en direct + `restart` au lieu de `build`).
 Retour arrière : `git checkout <tag>` puis reconstruire. Voir `ROLLBACK.md`.
 
 ## Docs compagnons
 
-- `MARQUE.md` (marque + knobs), `ROLLBACK.md` (versions/rollback), `backup-v1-sans-headless/` (code pré-headless).
+- `MARQUE.md` (marque + knobs), `ROLLBACK.md` (versions/rollback), `backup-v1-sans-headless/` (code pré-headless), `DEMARRER-CLAUDE-CODE.md` (guide d'ouverture du projet dans Claude Code).
 - `OPERER_AU_QUOTIDIEN.md` (dans **phase1-veille**) — le geste quotidien veille → reel.
 
 ## Projets liés (hors de ce dépôt)
@@ -105,7 +110,7 @@ Retour arrière : `git checkout <tag>` puis reconstruire. Voir `ROLLBACK.md`.
 - **Vérif des faits** via l'agent Critique.
 - **Suivi du coût par reel** (`cost.json`) : capter le coût réel remonté par OpenRouter à chaque appel (raisonnement + images + TTS + Veo) et l'écrire dans le dossier du reel, comme `verification.json`. Pour connaître le coût unitaire par reel.
 - **Tester un reel en mode Veo** (`REEL_AF_USE_VEO=true`) pour juger la qualité vidéo (vraie animation i2v) sur du contenu Bon Stock (~1,20–1,50 $/reel) — idéalement une fois le suivi de coût en place.
-- Éventuel **logo sonore** `CrazyTunes_Vocal-Logo_main.mp3` à intégrer (à confirmer avec Luc).
-- **Guide de démarrage Claude Code** : rédigé → `DEMARRER-CLAUDE-CODE.md`.
-  👉 **PREMIÈRE TÂCHE de la prochaine session** : accompagner Luc pour ouvrir
-  reels-af dans Claude Code (installation + lancement).
+- ~~Éventuel logo sonore `CrazyTunes_Vocal-Logo_main.mp3`~~ — retiré du dépôt en v1.8.0 (remplacé par l'indicatif intro/outro).
+- ~~Ouvrir reels-af dans Claude Code~~ — fait, c'est l'environnement de travail courant.
+
+**Note process** : garder ce fichier à jour à chaque version taguée — il avait pris deux versions de retard (resté à v1.5.0 alors que le code était en v1.8.0) avant cette révision du 2026-07-03.

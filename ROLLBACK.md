@@ -1,5 +1,25 @@
 # Reels-af — versions & retour arrière
 
+## Dernier tag : v1.8.0 (2026-07-02)
+
+Auto-vérification post-rendu (`render/verify.py`), intro/outro **vidéo** (en plus
+du logo statique, piochée au hasard dans `bon-stock/intro/` et `bon-stock/outro/`)
+avec l'indicatif joué au début **et** à la fin, **transitions xfade aléatoires**
+entre plans, **découpage des plans longs** (8 s → 2×4 s, chacun sa propre image),
+et **mode dev** (`docker-compose.override.yml` monte `src/` en direct : un
+`docker compose restart reel-af` suffit après une modif, plus besoin de
+reconstruire). Les jalons intermédiaires (v1.5–v1.7 : auto-vérif, puis
+intro/outro vidéo, puis découpage/transitions) n'ont pas été tagués
+individuellement — tout est regroupé dans le commit `v1.8.0`.
+
+**Revenir à cette version :**
+
+```bash
+cd ~/Claude/Projects/reels-af
+git checkout v1.8.0
+docker compose build reel-af && docker compose up -d reel-af   # ou restart si src/ inchangé depuis
+```
+
 ## ⭐ Point stable étiqueté : v1.3.0-stable (2026-07-02)
 
 Version de référence, testée et validée : extraction headless (JavaScript + blocages
