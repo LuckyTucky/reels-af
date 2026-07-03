@@ -17,11 +17,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import random
 from pathlib import Path
 from typing import Optional
 
 from agentfield.media_providers import OpenRouterProvider
-from PIL import Image, ImageDraw
+from PIL import Image
+
+_BROLL_EXTS = {"mp4", "mov", "m4v", "webm", "mkv", "avi"}
 
 import reel_af.sdk_patches  # noqa: F401
 from reel_af.models import Beat, BeatArtifact, BeatVisual, MotionHint
@@ -64,19 +67,58 @@ def _motion_clause(hint: MotionHint) -> str:
 
 
 def _placeholder_frame(out_path: Path, idx: int) -> Path:
-    """Solid muted gradient with the beat index, as a last-resort frame.
+    """Carte de secours de dernier recours quand la génération d'image échoue.
 
-    Used when image gen fails outright. The renderer falls back to a
-    ken-burns still of this so the reel still has something to show.
-    """
+    Fond UNI sombre (teinte verte discrète, façon marque) — pas de dégradé
+    deux-tons ni d'étiquette de débogage : une image ratée doit ressembler à
+    un plan sobre intentionnel, pas à un bug. Le rendu la transforme en plan
+    ken-burns pour que le reel ait quand même quelque chose à montrer."""
+    _ = idx  # plus d'étiquette « beat N » dans la sortie
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    img = Image.new("RGB", (_VEO_W, _VEO_H), color=(28, 28, 32))
-    draw = ImageDraw.Draw(img)
-    draw.rectangle(
-        (0, 0, _VEO_W, _VEO_H // 2), fill=(40, 40, 48),
-    )
-    draw.text((40, _VEO_H - 80), f"beat {idx}", fill=(200, 200, 200))
+    img = Image.new("RGB", (_VEO_W, _VEO_H), color=(13, 24, 19))
     img.save(str(out_path), format="JPEG", quality=88)
+    return out_path
+
+
+def _broll_clip() -> Optional[Path]:
+    """Clip Envato de b-roll au hasard (bon-stock/broll/). Sert de visuel de
+    secours quand la génération d'image d'un beat échoue — bien mieux qu'une
+    carte unie. None si le dossier est absent ou vide."""
+    root = Path(__file__).resolve().parents[3] / "bon-stock" / "broll"
+    if not root.is_dir():
+        return None
+    vids = [
+        p for p in root.iterdir()
+        if p.is_file() and p.suffix.lower().lstrip(".") in _BROLL_EXTS
+    ]
+    return random.choice(vids) if vids else None
+
+
+async def _clip_as_beat_video(src: Path, duration_s: float, out_path: Path) -> Path:
+    """Normalise un clip vidéo (Envato) en plan de beat 1080×1920 d'EXACTEMENT
+    `duration_s` secondes (bouclé s'il est trop court)."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    dur = max(1.0, float(duration_s))
+    vfilter = (
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,setsar=1,fps=30,format=yuv420p"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-stream_loop", "-1", "-i", str(src),
+        "-filter_complex", f"[0:v]{vfilter}[v]", "-map", "[v]", "-an",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "18",
+        "-r", "30", "-t", f"{dur:.3f}", "-movflags", "+faststart", str(out_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"render.video: normalisation b-roll {src.name} échouée "
+            f"(exit {proc.returncode}): {stderr.decode(errors='replace')[-400:]}"
+        )
     return out_path
 
 
@@ -160,6 +202,7 @@ async def _gen_one(
     the run output but doesn't abort.
     """
     frame_path: Optional[Path] = None
+    broll: Optional[Path] = None
     try:
         frame_path = await generate_first_frame(
             provider=provider,
@@ -169,12 +212,23 @@ async def _gen_one(
             content_mode=content_mode,
         )
     except Exception as e:
-        print(f"[render.video] beat {beat.idx} image gen failed ({e}); placeholder.")
-        frame_path = _placeholder_frame(
-            out_dir / f"frame-{beat.idx:02d}-placeholder.jpg", beat.idx,
-        )
+        # Repli 1 : un clip Envato de b-roll comme visuel du beat (mieux qu'une
+        # carte). Repli 2 : la carte de secours sobre, si aucun b-roll dispo.
+        broll = _broll_clip()
+        if broll is not None:
+            print(f"[render.video] beat {beat.idx} image gen failed ({e}); b-roll Envato.")
+        else:
+            print(f"[render.video] beat {beat.idx} image gen failed ({e}); placeholder.")
+            frame_path = _placeholder_frame(
+                out_dir / f"frame-{beat.idx:02d}-placeholder.jpg", beat.idx,
+            )
 
     video_path = out_dir / f"clip-{beat.idx:02d}.mp4"
+    if broll is not None:
+        # Le clip Envato EST le visuel du beat (pas de Veo ni de ken-burns).
+        await _clip_as_beat_video(broll, float(beat.veo_duration) + 0.5, video_path)
+        return BeatArtifact(idx=beat.idx, first_frame_path=None, video_path=video_path)
+
     if USE_VEO:
         try:
             await _gen_veo_clip(

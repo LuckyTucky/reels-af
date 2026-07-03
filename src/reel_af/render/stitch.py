@@ -23,10 +23,24 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import shlex
 import shutil
 import subprocess
 from pathlib import Path
+
+_VIDEO_EXTS = {"mp4", "mov", "m4v", "webm", "mkv", "avi"}
+INTRO_MAX_S = float(os.getenv("REEL_AF_INTRO_MAX_S") or "6")
+
+# Transitions entre beats : fondus xfade courts, piochés AU HASARD dans un
+# petit ensemble soigné. Durée réglable. Pour désactiver (coupes franches) :
+# REEL_AF_TRANSITIONS=none.
+TRANSITION_S = float(os.getenv("REEL_AF_TRANSITION_S") or "0.3")
+_TRANS_RAW = (os.getenv("REEL_AF_TRANSITIONS") or "").strip().lower()
+TRANSITION_POOL: list[str] = (
+    [] if _TRANS_RAW in ("", "none", "off", "0")
+    else [t.strip() for t in _TRANS_RAW.split(",") if t.strip()]
+)
 
 from reel_af.models import AccentOverlay, Beat, BeatArtifact, Card
 from reel_af.planning.safe_zone import CANVAS_H, CANVAS_W
@@ -105,6 +119,152 @@ def _background_audio() -> Path | None:
     """Indicatif sonore de fond (jingle) fourni par l'utilisateur, joué sous
     la voix pendant l'outro. Optionnel : None si absent."""
     return _bonstock_file(("indicatif", "jingle"))
+
+
+def _random_clip(subdir: str) -> Path | None:
+    """Choisit AU HASARD une vidéo dans bon-stock/<subdir>/ (ex. intro, outro).
+    None si le dossier est absent ou vide."""
+    root = Path(__file__).resolve().parents[3] / "bon-stock" / subdir
+    if not root.is_dir():
+        return None
+    vids = [
+        p for p in root.iterdir()
+        if p.is_file() and p.suffix.lower().lstrip(".") in _VIDEO_EXTS
+    ]
+    return random.choice(vids) if vids else None
+
+
+def _has_audio(path: Path) -> bool:
+    """Vrai si le fichier possède au moins une piste audio."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a",
+         "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True,
+    )
+    return bool(out.stdout.strip())
+
+
+def _off(flag: str, default: str = "1") -> bool:
+    """Un knob .env est-il désactivé ? (0/false/no/off)."""
+    return (os.getenv(flag) or default).strip().lower() in ("0", "false", "no", "off")
+
+
+async def _render_source_clip(src: Path, out_path: Path, max_dur: float) -> float:
+    """Rend une vidéo quelconque en clip SILENCIEUX 1080×1920 (mêmes réglages
+    codec que les beats, pour se concaténer proprement), plafonné à max_dur.
+    Renvoie la durée effective."""
+    dur = min(_probe_duration(src), max_dur)
+    vfilter = (
+        f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,"
+        f"crop={TARGET_W}:{TARGET_H},setsar=1,fps={FPS},format=yuv420p,"
+        f"trim=end={dur:.3f},setpts=PTS-STARTPTS"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+        "-filter_complex", f"[0:v]{vfilter}[v]", "-map", "[v]", "-an",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "18",
+        "-r", str(FPS), "-movflags", "+faststart", "-t", f"{dur:.3f}", str(out_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"stitch: rendu du clip {src.name} échoué (exit {proc.returncode}): "
+            f"{stderr.decode(errors='replace')[-500:]}"
+        )
+    return dur
+
+
+async def _trim_clip(src: Path, out_path: Path, dur: float) -> None:
+    """Coupe un clip déjà au format (1080×1920, silencieux) à `dur` secondes."""
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+        "-t", f"{dur:.3f}", "-an",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "18",
+        "-r", str(FPS), "-movflags", "+faststart", str(out_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"stitch: coupe du clip {src.name} échouée (exit {proc.returncode}): "
+            f"{stderr.decode(errors='replace')[-400:]}"
+        )
+
+
+async def _xfade_beats(
+    clips: list[Path], out_path: Path, T: float, pool: list[str],
+) -> None:
+    """Enchaîne les plans par fondus xfade — une transition piochée AU HASARD
+    dans `pool` à chaque frontière. Les plans doivent avoir un rab >= T (rendu
+    avec tail_s) pour ne pas rogner leur temps « solo ». Sortie silencieuse."""
+    n = len(clips)
+    if n < 2:
+        raise RuntimeError("xfade: il faut au moins 2 plans.")
+    cmd: list[str] = ["ffmpeg", "-y", "-loglevel", "error"]
+    for c in clips:
+        cmd += ["-i", str(c)]
+    parts: list[str] = []
+    cur = "[0:v]"
+    cur_len = _probe_duration(clips[0])
+    for k in range(1, n):
+        offset = max(0.0, cur_len - T)
+        trans = random.choice(pool)
+        out_lab = f"[vx{k}]"
+        parts.append(
+            f"{cur}[{k}:v]xfade=transition={trans}:"
+            f"duration={T:.3f}:offset={offset:.3f}{out_lab}"
+        )
+        cur = out_lab
+        cur_len = cur_len + _probe_duration(clips[k]) - T
+    cmd += [
+        "-filter_complex", ";".join(parts), "-map", cur, "-an",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "18",
+        "-r", str(FPS), "-movflags", "+faststart", str(out_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"stitch: xfade beats échoué (exit {proc.returncode}): "
+            f"{stderr.decode(errors='replace')[-600:]}"
+        )
+
+
+def _shift_ass(ass_path: Path, delta_s: float) -> None:
+    """Décale tous les événements du fichier ASS de delta_s secondes. Sert
+    quand un intro est ajouté devant : les sous-titres karaoké doivent glisser
+    d'autant pour rester alignés sur la narration."""
+    if delta_s <= 0:
+        return
+
+    def _t2s(t: str) -> float:
+        h, m, s = t.strip().split(":")
+        return int(h) * 3600 + int(m) * 60 + float(s)
+
+    def _s2t(x: float) -> str:
+        h = int(x // 3600); x -= h * 3600
+        m = int(x // 60); x -= m * 60
+        return f"{h}:{m:02d}:{x:05.2f}"
+
+    lignes = ass_path.read_text(encoding="utf-8").splitlines()
+    out = []
+    for ln in lignes:
+        if ln.startswith("Dialogue:"):
+            head, rest = ln.split(":", 1)
+            f = rest.split(",", 9)  # Layer,Start,End,Style,Name,ML,MR,MV,Effect,Text
+            if len(f) >= 3:
+                f[1] = _s2t(_t2s(f[1]) + delta_s)
+                f[2] = _s2t(_t2s(f[2]) + delta_s)
+                ln = head + ":" + ",".join(f)
+        out.append(ln)
+    ass_path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 async def _signature_audio(cache_dir: Path) -> Path | None:
@@ -216,8 +376,13 @@ async def _render_beat(
     beat: Beat,
     artifact: BeatArtifact,
     out_path: Path,
+    tail_s: float = 0.0,
 ) -> None:
     """Render one beat as a SILENT 1080×1920 clip.
+
+    ``tail_s`` ajoute un court rab en fin de plan (footage de recouvrement)
+    pour permettre un fondu enchaîné xfade avec le plan suivant sans rogner
+    le temps « solo » du beat.
 
     Scale + crop the Veo source to the canvas, trim to beat.veo_duration,
     emit at final codec settings so all clips concat cleanly. No
@@ -229,7 +394,7 @@ async def _render_beat(
             f"stitch: beat {beat.idx} has no video_path on artifact."
         )
 
-    dur = float(beat.veo_duration)
+    dur = float(beat.veo_duration) + max(0.0, tail_s)
     # setsar=1 normalizes pixel aspect ratio. Veo occasionally emits
     # clips with SAR 0:1 (undefined) or slightly non-square SAR that
     # the concat filter rejects later. Forcing 1:1 here makes every
@@ -278,25 +443,41 @@ async def _render_outro(
     logo: Path,
     out_path: Path,
     duration: float = OUTRO_DURATION_S,
+    bg_video: Path | None = None,
 ) -> None:
-    """Rend un plan de fin SILENCIEUX 1080×1920 : logo centré sur fond,
-    avec un léger fondu d'entrée. Mêmes réglages codec que les plans de
-    beat pour se concaténer proprement."""
-    # Boîte de sécurité pour le logo : ~62% de largeur, ~42% de hauteur,
-    # ratio préservé (le logo n'est jamais déformé).
+    """Rend un plan de fin SILENCIEUX 1080×1920 : logo centré, léger fondu.
+    Si bg_video est fourni, le fond est CETTE vidéo (recadrée plein cadre,
+    bouclée pour remplir la durée) ; sinon un fond de couleur qui épouse le
+    logo. Mêmes réglages codec que les beats pour se concaténer proprement."""
     box_w = int(TARGET_W * 0.62)
     box_h = int(TARGET_H * 0.42)
-    bg = _outro_background(logo)
-    filter_complex = (
-        f"[1:v]scale={box_w}:{box_h}:force_original_aspect_ratio=decrease[lg];"
-        f"[0:v][lg]overlay=(W-w)/2:(H-h)/2:format=auto,"
-        f"fade=t=in:st=0:d=0.4,setsar=1,format=yuv420p[v]"
-    )
-    cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-f", "lavfi",
-        "-i", f"color=c={bg}:s={TARGET_W}x{TARGET_H}:d={duration:.3f}:r={FPS}",
-        "-i", str(logo),
+    if bg_video is not None:
+        filter_complex = (
+            f"[0:v]scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,"
+            f"crop={TARGET_W}:{TARGET_H},setsar=1,fps={FPS},format=yuv420p[bg];"
+            f"[1:v]scale={box_w}:{box_h}:force_original_aspect_ratio=decrease[lg];"
+            f"[bg][lg]overlay=(W-w)/2:(H-h)/2:format=auto,"
+            f"fade=t=in:st=0:d=0.4,setsar=1,format=yuv420p[v]"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-stream_loop", "-1", "-i", str(bg_video),
+            "-i", str(logo),
+        ]
+    else:
+        bg = _outro_background(logo)
+        filter_complex = (
+            f"[1:v]scale={box_w}:{box_h}:force_original_aspect_ratio=decrease[lg];"
+            f"[0:v][lg]overlay=(W-w)/2:(H-h)/2:format=auto,"
+            f"fade=t=in:st=0:d=0.4,setsar=1,format=yuv420p[v]"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi",
+            "-i", f"color=c={bg}:s={TARGET_W}x{TARGET_H}:d={duration:.3f}:r={FPS}",
+            "-i", str(logo),
+        ]
+    cmd += [
         "-filter_complex", filter_complex,
         "-map", "[v]", "-an",
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
@@ -325,61 +506,65 @@ async def _render_outro(
 
 async def _single_pass_assemble(
     clip_paths: list[Path],
-    audio_path: Path,
+    audio_overlays: list[dict],
     ass_path: Path,
     font_path: str,
     out_path: Path,
-    signature_audio: Path | None = None,
-    outro_start_s: float | None = None,
-    background_audio: Path | None = None,
 ) -> None:
     """One ffmpeg call: concat filter + libass burn + AAC mux.
 
-    Si signature_audio + outro_start_s sont fournis, la signature vocale est
-    mixée dans la bande-son À PARTIR de outro_start_s (l'instant où le logo
-    apparaît). Si background_audio est fourni, un indicatif sonore joue SOUS
-    la voix (volume réduit) sur la même fenêtre."""
+    ``audio_overlays`` : liste de pistes à mixer, chacune un dict
+    ``{path, delay_ms, volume, trim_s}``. Pour chaque piste : coupe optionnelle
+    (``trim_s``), retard optionnel (``delay_ms``), atténuation optionnelle
+    (``volume``). Sert à placer indicatif-début, narration, voix, indicatif-fin
+    au bon moment. La durée de sortie est FORCÉE à la durée vidéo totale avec
+    ``-t`` (déterministe)."""
     n = len(clip_paths)
     if n == 0:
         raise RuntimeError("stitch: no clips to assemble.")
+    if not audio_overlays:
+        raise RuntimeError("stitch: no audio overlays to mix.")
 
     ass_arg = _ffmpeg_path_arg(ass_path)
     font_dir_arg = _ffmpeg_path_arg(Path(font_path).parent)
-
     concat_inputs = "".join(f"[{i}:v]" for i in range(n))
-    audio_idx = n
-
-    # Durée totale de la vidéo = somme des plans (beats + éventuel outro).
-    # On la calcule pour FORCER la longueur de sortie avec -t : c'est
-    # déterministe. (Le vieux réflexe -shortest ne fonctionne pas ici : avec
-    # apad, l'audio devient "infini" et -shortest ne coupe pas.)
     total_v = sum(_probe_duration(c) for c in clip_paths)
 
-    use_sig = signature_audio is not None and outro_start_s is not None
-    use_bg = use_sig and background_audio is not None
-    if use_sig:
-        # Narration + signature vocale (+ éventuel indicatif) retardées jusqu'à
-        # l'apparition du logo, puis mixées.
-        delay_ms = max(0, int(outro_start_s * 1000))
-        sig_idx = n + 1
-        parts = [f"[{sig_idx}:a]adelay={delay_ms}|{delay_ms}[sig]"]
-        mix_labels = [f"[{audio_idx}:a]", "[sig]"]
-        if use_bg:
-            bg_idx = n + 2
-            bg_vol = os.getenv("REEL_AF_SIGNATURE_BG_VOLUME") or "0.35"
-            parts.append(
-                f"[{bg_idx}:a]adelay={delay_ms}|{delay_ms},volume={bg_vol}[jin]"
-            )
-            mix_labels.append("[jin]")
+    # Un maillon par overlay : (atrim) -> (adelay) -> (volume).
+    parts: list[str] = []
+    labels: list[str] = []
+    for i, ov in enumerate(audio_overlays):
+        idx = n + i
+        chain: list[str] = []
+        trim_s = ov.get("trim_s")
+        if trim_s:
+            chain.append(f"atrim=0:{float(trim_s):.3f}")
+        delay = int(ov.get("delay_ms", 0) or 0)
+        if delay > 0:
+            chain.append(f"adelay={delay}|{delay}")
+        vol = float(ov.get("volume", 1.0))
+        if abs(vol - 1.0) > 0.001:
+            chain.append(f"volume={vol}")
+        if chain:
+            lab = f"[oa{i}]"
+            parts.append(f"[{idx}:a]{','.join(chain)}{lab}")
+            labels.append(lab)
+        else:
+            labels.append(f"[{idx}:a]")
+
+    if len(labels) == 1:
         audio_graph = (
-            ";".join(parts) + ";"
-            + "".join(mix_labels)
-            + f"amix=inputs={len(mix_labels)}:duration=longest:normalize=0[aout]"
+            parts[0][: -len(labels[0])] + "[aout]" if parts
+            else f"{labels[0]}anull[aout]"
         )
     else:
-        # apad garde une piste audio continue (silence après la narration)
-        # jusqu'à la fin du plan d'outro ; -t fixe la durée exacte du reel.
-        audio_graph = f"[{audio_idx}:a]apad[aout]"
+        audio_graph = ";".join(parts)
+        if audio_graph:
+            audio_graph += ";"
+        audio_graph += (
+            "".join(labels)
+            + f"amix=inputs={len(labels)}:duration=longest:normalize=0[aout]"
+        )
 
     filter_complex = (
         f"{concat_inputs}concat=n={n}:v=1:a=0[concat];"
@@ -390,11 +575,8 @@ async def _single_pass_assemble(
     cmd: list[str] = ["ffmpeg", "-y", "-loglevel", "error"]
     for clip in clip_paths:
         cmd += ["-i", str(clip)]
-    cmd += ["-i", str(audio_path)]
-    if use_sig:
-        cmd += ["-i", str(signature_audio)]
-    if use_bg:
-        cmd += ["-i", str(background_audio)]
+    for ov in audio_overlays:
+        cmd += ["-i", str(ov["path"])]
     cmd += [
         "-filter_complex", filter_complex,
         "-map", "[v]",
@@ -475,57 +657,146 @@ async def stitch_reel(
     else:
         write_reel_ass(cards, reel_ass, font_name=font_family)
 
-    # Step 2 — render each beat's SILENT clip in parallel.
+    # Step 2 — INTRO (vidéo Envato aléatoire, muette) puis beats.
     clip_paths: list[Path] = []
+    intro_dur = 0.0
+    intro_src = None if _off("REEL_AF_INTRO") else _random_clip("intro")
+    if intro_src is not None:
+        intro_clip = out_dir / "intro.mp4"
+        intro_dur = await _render_source_clip(intro_src, intro_clip, INTRO_MAX_S)
+        clip_paths.append(intro_clip)
+
+    transitions_on = bool(TRANSITION_POOL) and len(beats) >= 2
+    tail = TRANSITION_S if transitions_on else 0.0
+
+    beat_clips: list[Path] = []
     render_jobs: list[asyncio.Task[None]] = []
     for beat in beats:
         artifact = artifacts_by_idx.get(beat.idx)
         if artifact is None:
-            raise RuntimeError(
-                f"stitch: no artifact found for beat idx={beat.idx}"
-            )
+            raise RuntimeError(f"stitch: no artifact found for beat idx={beat.idx}")
         out_clip = out_dir / f"beat-{beat.idx:02d}-silent.mp4"
-        clip_paths.append(out_clip)
+        beat_clips.append(out_clip)
         render_jobs.append(
             asyncio.create_task(
-                _render_beat(beat=beat, artifact=artifact, out_path=out_clip)
+                _render_beat(beat=beat, artifact=artifact, out_path=out_clip,
+                             tail_s=tail)
             )
         )
     await asyncio.gather(*render_jobs)
 
-    # Durée cumulée des plans de narration = instant où le logo apparaîtra.
-    # La signature vocale démarrera pile à cet instant.
-    beats_total = sum(_probe_duration(c) for c in clip_paths)
+    narration_dur = _probe_duration(full_audio_path)
 
-    # Step 2 bis — plan de fin (outro) : logo Bon Stock + signature vocale.
+    # Les plans : soit enchaînés par fondus xfade aléatoires, soit concaténés en
+    # coupes franches. Dans les deux cas on borne à la longueur de la narration
+    # (pas de temps mort après la voix → reel punchy).
+    beats_video: Path | None = None
+    if transitions_on:
+        try:
+            xf = out_dir / "beats-xfade.mp4"
+            await _xfade_beats(beat_clips, xf, TRANSITION_S, TRANSITION_POOL)
+            if _probe_duration(xf) > narration_dur + 0.1:
+                trimmed = out_dir / "beats.mp4"
+                await _trim_clip(xf, trimmed, narration_dur)
+                xf = trimmed
+            beats_video = xf
+        except Exception as e:  # noqa: BLE001
+            print(f"[stitch] transitions xfade échouées ({e}); coupes franches.")
+            transitions_on = False
+
+    if beats_video is not None:
+        clip_paths.append(beats_video)
+        beats_total = _probe_duration(beats_video)
+    else:
+        # Coupes franches : retirer un éventuel rab (pour garder les bonnes
+        # frontières), puis borner à la narration plan par plan.
+        gardes: list[Path] = []
+        acc = 0.0
+        EPS = 0.15
+        for bc, beat in zip(beat_clips, beats):
+            solo = float(beat.veo_duration)
+            src = bc
+            if tail > 0:
+                notail = bc.with_name(bc.stem + "-notail.mp4")
+                await _trim_clip(bc, notail, solo)
+                src = notail
+            if acc >= narration_dur - EPS:
+                break
+            if acc + solo > narration_dur + EPS:
+                coupe = src.with_name(src.stem + "-trim.mp4")
+                await _trim_clip(src, coupe, narration_dur - acc)
+                gardes.append(coupe)
+                acc = narration_dur
+                break
+            gardes.append(src)
+            acc += solo
+        if gardes:
+            beat_clips = gardes
+        clip_paths.extend(beat_clips)
+        beats_total = sum(_probe_duration(c) for c in beat_clips)
+
+    # Les sous-titres sont calés sur la narration (départ 0). Un intro devant
+    # décale les beats dans le temps → on décale l'ASS d'autant.
+    if intro_dur > 0:
+        _shift_ass(reel_ass, intro_dur)
+
+    # Step 2 bis — OUTRO : logo (+ voix + indicatif) par-dessus une vidéo Envato.
     logo = _logo_path()
     signature: Path | None = None
-    background: Path | None = None
     outro_start: float | None = None
+    outro_dur = 0.0
     if logo is not None:
         signature = await _signature_audio(out_dir.parent)
-        background = _background_audio() if signature else None
         sig_dur = _probe_duration(signature) if signature else 0.0
-        # L'outro dure au moins OUTRO_DURATION_S, et assez pour ne pas couper
-        # la voix (durée de la signature + petite marge).
-        outro_dur = max(OUTRO_DURATION_S, sig_dur + 0.3) if sig_dur else OUTRO_DURATION_S
+        outro_dur = (
+            max(OUTRO_DURATION_S, sig_dur + 0.3) if sig_dur else OUTRO_DURATION_S
+        )
+        outro_video = None if _off("REEL_AF_OUTRO_VIDEO") else _random_clip("outro")
         outro_clip = out_dir / "outro-logo.mp4"
-        await _render_outro(logo, outro_clip, duration=outro_dur)
+        await _render_outro(logo, outro_clip, duration=outro_dur, bg_video=outro_video)
         clip_paths.append(outro_clip)
-        outro_start = beats_total
+        outro_start = intro_dur + beats_total
+
+    # Bande-son : indicatif au DÉBUT (sur l'intro) et à la FIN (sur l'outro),
+    # narration au milieu, signature vocale à l'arrivée de l'outro.
+    jingle = _background_audio()
+    intro_bg_vol = float(os.getenv("REEL_AF_INTRO_BG_VOLUME") or "0.8")
+    outro_bg_vol = float(os.getenv("REEL_AF_SIGNATURE_BG_VOLUME") or "0.35")
+    overlays: list[dict] = []
+    if jingle is not None and intro_dur > 0:
+        overlays.append({"path": jingle, "delay_ms": 0,
+                         "trim_s": intro_dur, "volume": intro_bg_vol})
+    overlays.append({"path": full_audio_path,
+                     "delay_ms": int(intro_dur * 1000), "volume": 1.0})
+    if outro_start is not None:
+        # Voix (si activée) ET/OU indicatif de fin — indépendants l'un de
+        # l'autre : l'indicatif joue à l'outro même si la voix est désactivée.
+        if signature is not None:
+            overlays.append({"path": signature,
+                             "delay_ms": int(outro_start * 1000), "volume": 1.0})
+        if jingle is not None:
+            overlays.append({"path": jingle, "delay_ms": int(outro_start * 1000),
+                             "trim_s": outro_dur, "volume": outro_bg_vol})
 
     # Step 3 — single ffmpeg invocation.
     final = out_dir / "reel.mp4"
     await _single_pass_assemble(
         clip_paths=clip_paths,
-        audio_path=full_audio_path,
+        audio_overlays=overlays,
         ass_path=reel_ass,
         font_path=font_path,
         out_path=final,
-        signature_audio=signature,
-        outro_start_s=outro_start,
-        background_audio=background,
     )
+
+    # Step 4 — auto-vérification post-rendu (non bloquante) : prouve que le
+    # reel est sain (format, audio non silencieux, pas d'écran noir). Écrit
+    # verification.json, et PROBLEME.txt si un défaut est détecté.
+    try:
+        from reel_af.render.verify import verify_reel
+        await asyncio.to_thread(verify_reel, final, out_dir)
+    except Exception:  # noqa: BLE001
+        pass
+
     _ = run_id  # accepted for forward-compat / log correlation
     return final
 

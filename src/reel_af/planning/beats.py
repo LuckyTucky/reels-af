@@ -9,6 +9,7 @@ snappy loop-back close).
 from __future__ import annotations
 
 import math
+import os
 
 from reel_af.models import Beat, ScriptDraft
 
@@ -78,5 +79,37 @@ def plan_beats(script: ScriptDraft, audio_duration_s: float) -> list[Beat]:
                 veo_duration=bucket,  # type: ignore[arg-type]
             )
         )
+
+    # Découpe des plans les plus longs (8 s) en deux plans de 4 s : plus
+    # d'images, coupes plus fréquentes, plus de dynamisme. Les sous-titres ne
+    # sont PAS touchés (ils sont calés sur la narration, pas sur les plans).
+    # Chaque sous-plan génère sa propre image. Désactivable : REEL_AF_SPLIT_LONG_PLANS=0.
+    if (os.getenv("REEL_AF_SPLIT_LONG_PLANS") or "1").strip().lower() not in (
+        "0", "false", "no", "off"
+    ):
+        reindexed: list[Beat] = []
+        for b in beats:
+            if b.veo_duration == 8:
+                for _ in range(2):
+                    reindexed.append(
+                        Beat(
+                            idx=len(reindexed),
+                            role=b.role,  # type: ignore[arg-type]
+                            text=b.text,
+                            target_duration_s=b.target_duration_s / 2,
+                            veo_duration=4,  # type: ignore[arg-type]
+                        )
+                    )
+            else:
+                reindexed.append(
+                    Beat(
+                        idx=len(reindexed),
+                        role=b.role,  # type: ignore[arg-type]
+                        text=b.text,
+                        target_duration_s=b.target_duration_s,
+                        veo_duration=b.veo_duration,  # type: ignore[arg-type]
+                    )
+                )
+        beats = reindexed
 
     return beats

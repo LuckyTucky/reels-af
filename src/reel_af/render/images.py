@@ -10,6 +10,7 @@ like a perfume ad.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -102,20 +103,33 @@ async def generate_first_frame(
     final_path = out_dir / f"frame-{idx:02d}.jpg"
 
     augmented = _augment(image_prompt, content_mode)
-    result = await provider.generate_image(
-        prompt=augmented,
-        model=IMAGE_MODEL,
-        n=1,
+
+    # Réessais : la génération d'image (Gemini) rate parfois de façon
+    # transitoire (vide, timeout, hoquet réseau). Un seul essai laissait alors
+    # un vilain placeholder dans le reel. On tente jusqu'à 3 fois avant de
+    # laisser l'appelant retomber sur le placeholder.
+    tentatives = int(os.getenv("REEL_AF_IMAGE_RETRIES") or "3")
+    derniere_err: Exception | None = None
+    for essai in range(max(1, tentatives)):
+        try:
+            result = await provider.generate_image(
+                prompt=augmented, model=IMAGE_MODEL, n=1,
+            )
+            # Le SDK renvoie un MultimodalResponse dont les images sont dans
+            # `.images` (pas une liste directe — d'où l'ancien bug
+            # "'MultimodalResponse' object is not subscriptable"). On tolère
+            # aussi le cas où une autre version renverrait déjà une liste.
+            images = getattr(result, "images", result)
+            if images:
+                images[0].save(str(raw_path))
+                return _crop_to_9x16(raw_path, final_path)
+            derniere_err = RuntimeError("image gen returned no images")
+        except Exception as e:  # noqa: BLE001
+            derniere_err = e
+        if essai < tentatives - 1:
+            await asyncio.sleep(1.5 * (essai + 1))
+
+    raise RuntimeError(
+        f"generate_first_frame: échec après {tentatives} tentative(s) "
+        f"pour beat {idx} : {derniere_err}"
     )
-    # Le SDK renvoie un objet MultimodalResponse dont les images sont dans
-    # l'attribut `.images` (et non une liste directement — d'où le bug
-    # "'MultimodalResponse' object is not subscriptable"). On gère aussi le
-    # cas où une autre version renverrait déjà une liste.
-    images = getattr(result, "images", result)
-    if not images:
-        raise RuntimeError(
-            f"generate_first_frame: image gen returned no images for beat {idx}"
-        )
-    img = images[0]
-    img.save(str(raw_path))
-    return _crop_to_9x16(raw_path, final_path)

@@ -34,3 +34,8 @@ output/
 # OS
 .DS_Store
 Thumbs.db
+
+# Clips vidéo Envato intro/outro (trop lourds pour git ; montés en direct)
+bon-stock/intro/
+bon-stock/outro/
+bon-stock/broll/

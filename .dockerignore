@@ -9,3 +9,8 @@ __pycache__
 .DS_Store
 output/
 assets/
+
+# Clips vidéo Envato (montés en direct, pas cuits dans l'image)
+bon-stock/intro/
+bon-stock/outro/
+bon-stock/broll/
