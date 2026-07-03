@@ -80,6 +80,7 @@ Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres
 4. **Variable d'env vide écrase le défaut** : utiliser `os.getenv(X) or "def"`, pas `os.getenv(X, "def")` (docker-compose passe `""` quand non défini).
 5. **Ne PAS lancer git dans le dépôt monté depuis le sandbox/Cowork** : le décalage de permissions laisse des `.git/*.lock` que l'utilisateur doit `rm`. → **Préparer les commandes git pour que Luc les lance dans SON Terminal.**
 6. **Sérialisation** : un reel à la fois (verrou moteur). Ne pas se fier à la méthode de lancement.
+7. **Remotes git** : `Agent-Field/reels-af` (le repo template d'origine) est un dépôt tiers — Luc n'y a **pas** les droits d'écriture. Depuis 2026-07-03, `origin` pointe vers son fork **`LuckyTucky/reels-af`** (créé via `gh repo fork --remote`) ; `upstream` = `Agent-Field/reels-af` en lecture seule. `git push` pousse donc vers le fork. Auth GitHub gérée par `gh auth login` (déjà fait, pas de mot de passe à ressaisir).
 
 ## Auto-vérification post-rendu (`render/verify.py`)
 
