@@ -28,6 +28,7 @@ _BROLL_EXTS = {"mp4", "mov", "m4v", "webm", "mkv", "avi"}
 
 import reel_af.sdk_patches  # noqa: F401
 from reel_af.models import Beat, BeatArtifact, BeatVisual, MotionHint
+from reel_af.render import cost as cost_track
 from reel_af.render.images import generate_first_frame
 
 VIDEO_MODEL = os.getenv(
@@ -174,16 +175,20 @@ async def _gen_veo_clip(
     """
     prompt = f"{visual.image_prompt}. {_motion_clause(visual.motion_hint)}."
     first_frame_url = _image_to_data_url(frame_path)
-    video_bytes = await provider.generate_video(  # type: ignore[attr-defined]
+    result = await provider.generate_video(  # type: ignore[attr-defined]
         prompt=prompt,
         model=VIDEO_MODEL,
-        first_frame=first_frame_url,
+        image_url=first_frame_url,
         duration=int(beat.veo_duration),
     )
-    if not video_bytes:
+    videos = getattr(result, "videos", None) or []
+    if not videos or not videos[0].data:
         raise RuntimeError(
-            f"_gen_veo_clip: video provider returned empty bytes for beat {beat.idx}"
+            f"_gen_veo_clip: video provider returned no video for beat {beat.idx}"
         )
+    video_bytes = base64.b64decode(videos[0].data)
+    raw = getattr(result, "raw_response", None) or {}
+    cost_track.add("video", raw.get("cost"), model=VIDEO_MODEL, beat_idx=beat.idx)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(video_bytes)
     return out_path

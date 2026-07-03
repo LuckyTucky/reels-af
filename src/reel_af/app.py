@@ -58,6 +58,7 @@ from agentfield import Agent, AgentRouter, AIConfig  # noqa: E402
 # Apply SDK bug-fixes at startup so every OpenRouterProvider call gets
 # the fixed behaviour. Module is idempotent.
 import reel_af.sdk_patches  # noqa: E402, F401
+from reel_af.render import cost as cost_track  # noqa: E402
 
 app = Agent(
     node_id=os.getenv("AGENT_NODE_ID", "reel-af"),
@@ -418,6 +419,11 @@ async def _article_to_reel_locked(url: str, out_dir: str | None = None) -> dict:
     media_dir = out_path / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
 
+    # Un seul reel rendu à la fois (_REEL_RENDER_LOCK) → un accumulateur
+    # global suffit pour capter le coût réel de CE run.
+    app.cost_tracker.reset()
+    cost_track.reset()
+
     timings: dict[str, float] = {}
     node = app.node_id
     app.note(
@@ -469,6 +475,8 @@ async def _article_to_reel_locked(url: str, out_dir: str | None = None) -> dict:
         timings=timings,
     )
 
+    cost_report = cost_track.write(out_path, app.execution_cost)
+
     timings["total"] = round(time.time() - t_pipeline, 1)
     app.note(
         f"reel-af article: run {run_id} done → {final['video_path']}",
@@ -484,6 +492,7 @@ async def _article_to_reel_locked(url: str, out_dir: str | None = None) -> dict:
         "domain": essence["domain"],
         "run_id": run_id,
         "timings_s": timings,
+        "cost_usd": cost_report["total_cost_usd"],
     }
 
 
@@ -522,6 +531,11 @@ async def _topic_to_reel_locked(topic: str, out_dir: str | None = None) -> dict:
     out_path.mkdir(parents=True, exist_ok=True)
     media_dir = out_path / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
+
+    # Un seul reel rendu à la fois (_REEL_RENDER_LOCK) → un accumulateur
+    # global suffit pour capter le coût réel de CE run.
+    app.cost_tracker.reset()
+    cost_track.reset()
 
     timings: dict[str, float] = {}
     node = app.node_id
@@ -618,6 +632,8 @@ async def _topic_to_reel_locked(topic: str, out_dir: str | None = None) -> dict:
         timings=timings,
     )
 
+    cost_report = cost_track.write(out_path, app.execution_cost)
+
     timings["total"] = round(time.time() - t_pipeline, 1)
     app.note(
         f"reel-af topic: run {run_id} done → {final['video_path']}",
@@ -639,6 +655,7 @@ async def _topic_to_reel_locked(topic: str, out_dir: str | None = None) -> dict:
         "all_narrations": [s["narration"] for s in scripts],
         "run_id": run_id,
         "timings_s": timings,
+        "cost_usd": cost_report["total_cost_usd"],
     }
 
 

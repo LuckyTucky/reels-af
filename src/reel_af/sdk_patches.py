@@ -10,6 +10,7 @@ The patches are applied on import. Idempotent.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 from pathlib import Path
@@ -339,11 +340,167 @@ def _patch_openrouter_speech() -> None:
     _mp.OpenRouterProvider.generate_speech = generate_speech  # type: ignore[attr-defined]
 
 
+def _patch_openrouter_image_usage() -> None:
+    """Ask OpenRouter to include real per-call cost in image responses.
+
+    `generate_image()` doesn't request `usage: {include: true}`, so
+    OpenRouter's response omits `usage.cost` and reel-af has no way to know
+    what a given image generation actually cost. This wraps the method to
+    inject the flag into every request. The SDK already keeps the full
+    response as `MultimodalResponse.raw_response`, so once the flag is set
+    the real cost is available at `raw_response["usage"]["cost"]` — no
+    further extraction patch needed.
+    """
+    from agentfield import media_providers as _mp
+
+    original = _mp.OpenRouterProvider.generate_image
+    if getattr(original, "__reel_af_patched__", False):
+        return
+
+    async def patched_generate_image(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        extra = dict(kwargs.get("extra") or {})
+        extra.setdefault("usage", {"include": True})
+        kwargs["extra"] = extra
+        return await original(self, *args, **kwargs)
+
+    patched_generate_image.__reel_af_patched__ = True  # type: ignore[attr-defined]
+    _mp.OpenRouterProvider.generate_image = patched_generate_image  # type: ignore[assignment]
+
+
+def _patch_litellm_completion_cost_fallback() -> None:
+    """SDK gap — every `.ai()` call is priced at $0 because of a litellm
+    model-key mismatch.
+
+    `detect_multimodal_response()` (agentfield.multimodal_response) prices
+    each call via `litellm.completion_cost(completion_response=response)`,
+    which infers the pricing key from `response.model`. Calls proxied
+    through OpenRouter's api_base come back with the bare vendor/model
+    string (e.g. "anthropic/claude-sonnet-4") instead of the
+    "openrouter/anthropic/claude-sonnet-4" key reel-af actually configured
+    — litellm's pricing table only has the latter, so the lookup raises,
+    the SDK swallows the exception, and `cost_usd` stays `None` forever.
+    `cost_tracker.record()` is only called when `cost_usd is not None`, so
+    reasoning cost silently reports $0 for every reel.
+
+    `litellm.cost_per_token(model=..., prompt_tokens=..., completion_tokens=...)`
+    is a lower-level lookup that doesn't depend on guessing the model from
+    the response — it takes the pricing key directly. This patch retries
+    through it, using REEL_AF_MODEL (the key we know is correctly priced —
+    see `.env`), whenever the primary lookup fails or returns 0.
+    """
+    import litellm
+
+    if getattr(litellm.completion_cost, "__reel_af_patched__", False):
+        return
+
+    original = litellm.completion_cost
+    fallback_model = (
+        os.environ.get("REEL_AF_MODEL") or "openrouter/anthropic/claude-sonnet-4"
+    )
+
+    def patched_completion_cost(*args, **kwargs):  # type: ignore[no-untyped-def]
+        try:
+            cost = original(*args, **kwargs)
+        except Exception:
+            cost = 0.0
+        if cost:
+            return cost
+
+        response = kwargs.get("completion_response") or (args[0] if args else None)
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return cost
+        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        if not (prompt_tokens or completion_tokens):
+            return cost
+
+        try:
+            in_cost, out_cost = litellm.cost_per_token(
+                model=fallback_model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+            return in_cost + out_cost
+        except Exception:
+            return cost
+
+    patched_completion_cost.__reel_af_patched__ = True  # type: ignore[attr-defined]
+    litellm.completion_cost = patched_completion_cost  # type: ignore[assignment]
+
+
+_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$", re.MULTILINE)
+_BRACES_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _strip_and_parse_json(text: str) -> Any:
+    """Best-effort JSON extraction: strip markdown code fences, then fall
+    back to grabbing the outermost {...} block — same regex the SDK itself
+    uses, just applied AFTER fence stripping instead of on the raw text."""
+    cleaned = _FENCE_RE.sub("", text).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    m = _BRACES_RE.search(cleaned)
+    if not m:
+        raise ValueError("no JSON object found after stripping code fences")
+    return json.loads(m.group())
+
+
+def _patch_agentai_schema_fence_fallback() -> None:
+    """SDK gap — schema-constrained `.ai(schema=...)` calls raise "Could not
+    parse structured response" when the model wraps valid JSON in markdown
+    code fences (```json ... ```). The SDK tries plain `json.loads()` then a
+    `\\{.*\\}` regex extraction on the RAW text — neither strips fences
+    first, so a cleanly-fenced (but otherwise perfectly valid) response
+    fails both attempts and the whole reel dies at that reasoner, even
+    though the LLM did nothing wrong.
+
+    The parsing logic is inline in `AgentAI.ai()`'s ~580-line body (no
+    separable helper to patch), but the raw failing text is embedded
+    verbatim in the exception message. So instead of reimplementing the
+    method, we wrap it: let the original call run (schema, retries, and all
+    — no extra LLM call), and on that specific ValueError, pull the text
+    back out and retry the parse ourselves with fence stripping. Only
+    kicks in for that exact failure mode; anything else re-raises
+    untouched.
+    """
+    from agentfield.agent_ai import AgentAI
+
+    if getattr(AgentAI.ai, "__reel_af_patched__", False):
+        return
+
+    original = AgentAI.ai
+    _PREFIX = "Could not parse structured response: "
+
+    async def patched_ai(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        schema = kwargs.get("schema")
+        try:
+            return await original(self, *args, **kwargs)
+        except ValueError as exc:
+            message = str(exc)
+            if not schema or not message.startswith(_PREFIX):
+                raise
+            raw_text = message[len(_PREFIX):]
+            try:
+                data = _strip_and_parse_json(raw_text)
+                return schema(**data)
+            except Exception:
+                raise exc from None
+
+    patched_ai.__reel_af_patched__ = True  # type: ignore[attr-defined]
+    AgentAI.ai = patched_ai  # type: ignore[assignment]
+
+
 def apply_all() -> None:
     """Apply every patch. Idempotent — safe to call multiple times."""
     _patch_image_output_save()
     _patch_openrouter_video_download()
     _patch_openrouter_speech()
+    _patch_openrouter_image_usage()
+    _patch_litellm_completion_cost_fallback()
+    _patch_agentai_schema_fence_fallback()
 
 
 # Apply on import so any code that imports this module gets the fixes.

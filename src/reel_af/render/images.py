@@ -18,6 +18,7 @@ from agentfield.media_providers import OpenRouterProvider
 from PIL import Image
 
 import reel_af.sdk_patches  # noqa: F401
+from reel_af.render import cost as cost_track
 
 IMAGE_MODEL = os.getenv(
     "REEL_AF_IMAGE_MODEL", "openrouter/google/gemini-2.5-flash-image"
@@ -121,6 +122,11 @@ async def generate_first_frame(
             # aussi le cas où une autre version renverrait déjà une liste.
             images = getattr(result, "images", result)
             if images:
+                raw = getattr(result, "raw_response", None) or {}
+                usage = raw.get("usage") or {}
+                cost_track.add(
+                    "image", usage.get("cost"), model=IMAGE_MODEL, beat_idx=idx,
+                )
                 images[0].save(str(raw_path))
                 return _crop_to_9x16(raw_path, final_path)
             derniere_err = RuntimeError("image gen returned no images")

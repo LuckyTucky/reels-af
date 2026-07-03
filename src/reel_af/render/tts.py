@@ -30,6 +30,7 @@ from agentfield.media_providers import OpenRouterProvider
 # be imported before we call generate_speech.
 import reel_af.sdk_patches  # noqa: F401
 from reel_af.models import WordTiming
+from reel_af.render import cost as cost_track
 
 # ───── Constants ─────────────────────────────────────────────────────
 
@@ -115,6 +116,9 @@ async def _sdk_generate_wav(
             f"reel_af.render.tts: generate_speech returned no audio for "
             f"model {model}"
         )
+    # OpenRouter /audio/speech renvoie des octets bruts, sans info de coût —
+    # on logue au moins la taille du texte envoyé pour garder une trace.
+    cost_track.add("tts", None, model=model, chars=len(tagged_script))
     return _wrap_pcm16_bytes_as_wav(pcm)
 
 

@@ -28,11 +28,14 @@ Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres
   - `reel-af` (l'agent, `python main.py`) → port **8092**
 - **Le code est INCLUS dans l'image** (`COPY . /app` dans le Dockerfile). En prod, **toute modif dans `src/` exige une reconstruction** :
   `docker compose build reel-af && docker compose up -d reel-af` (~70 s).
-- **MODE DEV (actif) :** `docker-compose.override.yml` monte `src/` **en direct**
-  (`./src:/app/src:ro`). Une modif de `src/` prend alors effet avec
-  `docker compose restart reel-af` (~3 s), **sans reconstruire**. Reconstruire
-  seulement si on change `pyproject.toml` (dépendances) ou le `Dockerfile`.
-- Seul **`./output`** est monté (persiste entre reconstructions). Le reste (logo, code) est **cuit dans l'image** → reconstruire pour le prendre.
+- **MODE DEV (actif) :** `docker-compose.override.yml` monte `src/` **et `.env`**
+  en direct (`./src:/app/src:ro`, `./.env:/app/.env:ro`). Une modif de `src/`
+  **ou de `.env`** prend alors effet avec `docker compose restart reel-af`
+  (~3 s), **sans reconstruire**. Reconstruire seulement si on change
+  `pyproject.toml` (dépendances) ou le `Dockerfile`.
+- `./output` et `bon-stock/` sont aussi montés en direct (persiste entre
+  reconstructions). Le reste (code applicatif) est cuit dans l'image →
+  reconstruire pour le prendre.
 - **Docker Desktop doit tourner** (`open -a Docker`). Si des reels « se lancent » mais que rien n'apparaît dans `output/`, c'est presque toujours que Docker est éteint.
 
 ## Lancer un reel
@@ -109,8 +112,8 @@ Retour arrière : `git checkout <tag>` puis reconstruire. Voir `ROLLBACK.md`.
 - **Ton** de la signature vocale (ajustable via `.env`, en cours).
 - **Cadre d'accroche** viral (à adapter dans le reasoner de script ; utiliser le plugin `brand-voice`).
 - **Vérif des faits** via l'agent Critique.
-- **Suivi du coût par reel** (`cost.json`) : capter le coût réel remonté par OpenRouter à chaque appel (raisonnement + images + TTS + Veo) et l'écrire dans le dossier du reel, comme `verification.json`. Pour connaître le coût unitaire par reel.
-- **Tester un reel en mode Veo** (`REEL_AF_USE_VEO=true`) pour juger la qualité vidéo (vraie animation i2v) sur du contenu Bon Stock (~1,20–1,50 $/reel) — idéalement une fois le suivi de coût en place.
+- ~~Suivi du coût par reel~~ — fait (2026-07-03) : `render/cost.py` écrit `cost.json` dans chaque dossier de reel (raisonnement + images + vidéo captés en dollars réels ; TTS non exposé par l'API OpenRouter, seulement le nombre de caractères).
+- ~~Tester un reel en mode Veo~~ — fait (2026-07-03), comparé sur le même article : Ken Burns ≈ 0,47 $/reel vs Veo ≈ 2,07 $/reel (~×4-5, jusqu'à 8 plans à 0,32 $ chacun si tous réussissent). **Décision de Luc : la qualité vidéo ne justifie pas le surcoût — Ken Burns reste le mode par défaut** (`REEL_AF_USE_VEO=false`). Veo reste disponible au besoin pour un reel exceptionnel (basculer `.env` + `docker compose restart reel-af`, sans oublier de repasser à `false` après).
 - ~~Éventuel logo sonore `CrazyTunes_Vocal-Logo_main.mp3`~~ — retiré du dépôt en v1.8.0 (remplacé par l'indicatif intro/outro).
 - ~~Ouvrir reels-af dans Claude Code~~ — fait, c'est l'environnement de travail courant.
 

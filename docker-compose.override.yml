@@ -1,14 +1,17 @@
 # ── Mode DÉVELOPPEMENT ────────────────────────────────────────────────
 # Fusionné AUTOMATIQUEMENT avec docker-compose.yml par « docker compose ».
 #
-# Monte le code source EN DIRECT dans le conteneur. Résultat : un changement
-# dans src/ prend effet avec un simple redémarrage (~3 s) au lieu d'une
-# reconstruction complète (~70 s) :
+# Monte le code source ET .env EN DIRECT dans le conteneur. Résultat : un
+# changement dans src/ ou .env prend effet avec un simple redémarrage (~3 s)
+# au lieu d'une reconstruction complète (~70 s) :
 #
-#     docker compose restart reel-af      # après une modif de src/
+#     docker compose restart reel-af      # après une modif de src/ ou .env
 #
 # (PYTHONPATH=/app/src pointe déjà sur ce dossier → le code monté est lu en
-#  direct. Le montage est en lecture seule : le conteneur ne modifie rien.)
+#  direct. .env est lu par app.py via load_dotenv() au démarrage du process
+#  — donc un restart suffit, pas juste un `up -d` qui ne recrée rien si la
+#  config compose n'a pas changé. Les montages sont en lecture seule : le
+#  conteneur ne modifie rien.)
 #
 # ⚠️ Une reconstruction reste nécessaire seulement si tu changes les
 #    DÉPENDANCES (pyproject.toml) ou le Dockerfile.
@@ -20,3 +23,4 @@ services:
   reel-af:
     volumes:
       - ./src:/app/src:ro
+      - ./.env:/app/.env:ro
