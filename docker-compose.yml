@@ -12,6 +12,14 @@ services:
     # no wget, no curl. A CMD-based healthcheck cannot run inside the
     # container. The agent SDK retries connection on startup, so
     # service_started is sufficient.
+    #
+    # `unless-stopped` (not `on-failure`): this container has been observed
+    # exiting cleanly (exit code 0, not a crash) on its own — e.g. after
+    # Docker Desktop itself restarts — which `on-failure` would NOT catch
+    # (it only restarts on non-zero exit). Without any restart policy the
+    # reels-af engine silently goes dark until someone notices and runs
+    # `docker compose up -d` by hand.
+    restart: unless-stopped
 
   reel-af:
     build:
