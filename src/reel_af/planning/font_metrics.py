@@ -26,8 +26,14 @@ _WIDTHS: dict[str, float] = {
 DEFAULT_WIDTH = 1.0
 
 # Max chars-of-average-width per line on the 9:16 safe stage at ~80px font.
-# Tightened from 25 to 18 so long cards don't bleed off the edges.
-MAX_CHARS_PER_LINE = 18.0
+# Tightened from 25 to 18, then to 15 on 2026-07-05: a French test reel
+# overflowed on "neuroscientifiques" (measured ~14.9 units under the old
+# 18.0 cap — comfortably "fits" by this heuristic, but visibly bled off
+# the safe zone in the real libass render). French runs slightly longer
+# average word length than English (more polysyllabic compounds), which
+# exposed a calibration gap this table already had. 15.0 adds margin for
+# both languages rather than branching the constant by REEL_AF_LANG.
+MAX_CHARS_PER_LINE = 15.0
 
 # Max lines per card — anything over 2 lines is too tall to read on scroll.
 MAX_LINES_PER_CARD = 2

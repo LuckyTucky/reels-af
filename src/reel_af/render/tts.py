@@ -58,6 +58,14 @@ _VOICE_BY_TONE: dict[str, str] = {
     "playful": "Puck",        # bright, conversational
 }
 
+# REEL_AF_LANG=fr — même interrupteur que hook.py/compose.py. Une seule
+# voix française pour l'instant (pas de mapping par ton) : les 30 voix
+# Gemini ont été testées sur une phrase FR (bon-stock/STYLE-FR.md),
+# Leda/Despina/Sulafat jugées trop « bébé » (susurrements), Puck retenue
+# par Luc le 2026-07-05.
+LANG = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
+_FR_VOICE = "Puck"
+
 _TAG_RE = re.compile(r"\[[^\]]*\]")
 _SENTENCE_END = re.compile(r"[.!?]+(?:[\"'’”])?\s*$")
 
@@ -66,7 +74,10 @@ _SENTENCE_END = re.compile(r"[.!?]+(?:[\"'’”])?\s*$")
 
 
 def voice_for_tone(tone: str) -> str:
-    """Pick a Gemini voice that matches the script's tone."""
+    """Pick a Gemini voice that matches the script's tone.
+    En français (REEL_AF_LANG=fr), une seule voix fixe pour l'instant."""
+    if LANG == "fr":
+        return _FR_VOICE
     return _VOICE_BY_TONE.get(tone, "Kore")
 
 
@@ -154,13 +165,20 @@ def _split_sentences_with_tags(narration: str) -> list[str]:
 
 
 def _syllables(word: str) -> int:
-    """Cheap syllable estimate: count vowel groups; acronyms count letters."""
+    """Cheap syllable estimate: count vowel groups; acronyms count letters.
+
+    Inclut les voyelles accentées françaises (é, è, à, ç n'est pas une
+    voyelle mais œ/â/ê/î/ô/û/ü/ï en sont) — sans ça, `re.sub(r"[^a-z]", …)`
+    effaçait purement et simplement les accents avant de compter, ce qui
+    sous-comptait les syllabes des mots français (« être » perdait son
+    « ê » et retombait à 0 groupe de voyelles). Ne change rien pour
+    l'anglais (aucun de ces caractères n'y apparaît)."""
     if word.isupper() and len(re.sub(r"[^A-Z]", "", word)) >= 2:
         return max(1, len(re.sub(r"[^A-Z]", "", word)))
-    norm = re.sub(r"[^a-z]", "", word.lower())
+    norm = re.sub(r"[^a-zàâäéèêëïîôöùûüœ]", "", word.lower())
     if not norm:
         return 1
-    groups = re.findall(r"[aeiouy]+", norm)
+    groups = re.findall(r"[aeiouyàâäéèêëïîôöùûüœ]+", norm)
     return max(1, len(groups))
 
 
@@ -259,6 +277,7 @@ async def synthesize_audio(
     out_dir: Path,
     *,
     model: Optional[str] = None,
+    target_wpm: int = 180,
 ) -> tuple[Path, list[WordTiming]]:
     """Synthesize sentence-by-sentence, concatenate, return per-word
     timings whose sentence boundaries are sample-accurate.
@@ -279,11 +298,12 @@ async def synthesize_audio(
 
     sent_dir = out_dir / "sentences"
     sent_dir.mkdir(parents=True, exist_ok=True)
+    target_wps = target_wpm / 60.0
 
     async def _synth_one(idx: int, sent_with_tags: str) -> tuple[Path, float]:
         sub_dir = sent_dir / f"s{idx:02d}"
         sub_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path, _ = await synthesize_audio_single(
+        tmp_path, raw_dur = await synthesize_audio_single(
             narration=sent_with_tags,
             voice=voice,
             out_dir=sub_dir,
@@ -292,7 +312,20 @@ async def synthesize_audio(
         raw_path = sent_dir / f"sentence-{idx:02d}-raw.wav"
         tmp_path.rename(raw_path)
         final_path = sent_dir / f"sentence-{idx:02d}.wav"
-        await _atempo_speed_up(raw_path, final_path, _AUDIO_SPEED_FACTOR)
+
+        # Débit ADAPTATIF par phrase plutôt qu'un facteur fixe : chaque
+        # phrase est synthétisée indépendamment par Gemini (pas de contexte
+        # partagé entre elles), donc son débit naturel varie — un facteur
+        # d'accélération unique préserve ces écarts au lieu de les
+        # uniformiser, d'où un rythme perçu comme inégal sur tout le reel.
+        # On vise le même débit (mots/seconde) pour chaque phrase, borné à
+        # une plage qui reste naturelle à l'oreille.
+        word_count = len(strip_tts_tags(sent_with_tags).split())
+        target_dur = word_count / target_wps if target_wps > 0 and word_count else raw_dur
+        factor = raw_dur / target_dur if target_dur > 0 else _AUDIO_SPEED_FACTOR
+        factor = max(1.15, min(factor, 1.6))
+
+        await _atempo_speed_up(raw_path, final_path, factor)
         dur = _probe_duration(final_path)
         return final_path, dur
 

@@ -241,12 +241,14 @@ async def pick_best_narration(
 
 @reel.reasoner()
 async def synthesize_audio(
-    narration: str, voice_tone: str, out_dir: str,
+    narration: str, voice_tone: str, out_dir: str, target_wpm: int = 180,
 ) -> dict:
     """Sentence-by-sentence TTS + sample-accurate word timings.
 
-    Each sentence synthesizes independently (in parallel), is
-    sped-up via ffmpeg ``atempo`` (preserves pitch), measured with
+    Each sentence synthesizes independently (in parallel), is sped-up via
+    ffmpeg ``atempo`` — ADAPTIVELY per sentence, targeting target_wpm,
+    since each sentence's natural Gemini speaking rate varies with no
+    shared context between calls (preserves pitch), measured with
     ffprobe, then native-wave concatenated. Sentence boundaries are
     sample-accurate on the final timeline; words within a sentence
     are distributed by syllable count.
@@ -260,6 +262,7 @@ async def synthesize_audio(
     voice = voice_for_tone(voice_tone)
     audio_path, word_timings = await _synth(
         narration=narration, voice=voice, out_dir=Path(out_dir),
+        target_wpm=target_wpm,
     )
     duration_s = word_timings[-1].end_s if word_timings else 0.0
     return {
@@ -735,6 +738,7 @@ async def _render_downstream(
         narration=script["narration"],
         voice_tone="wonder",
         out_dir=str(media_dir),
+        target_wpm=script["target_wpm"],
     )
     timings["tts"] = round(time.time() - t, 1)
 

@@ -11,9 +11,16 @@ pas de 2e appel LLM juge, les candidats se notent eux-mêmes.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from reel_af.models import Essence, HookBatch, HookCandidate, HookPick
+
+# REEL_AF_LANG=fr bascule hook.py + compose.py en français québécois (voir
+# bon-stock/STYLE-FR.md). extract.py reste inchangé (multilingue). Lu une
+# fois au chargement du module — c'est un interrupteur de projet, pas un
+# réglage par reel (contrairement à REEL_AF_ART_STYLE).
+LANG = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
 
 _SYSTEM = """You are a viral-hook specialist. Given the essence of an
 article, write {n} DIFFERENT candidate opening hooks — the literal first
@@ -35,8 +42,51 @@ editor uses — be honest and self-critical, not generous):
 
 Do NOT invent facts not in the essence below."""
 
+# Variante FR — voir bon-stock/STYLE-FR.md (registre, tutoiement, anglicismes
+# à éviter). Le hook reste ≤12 mots (STYLE-FR : « courte, concrète, une
+# seule idée surprenante ») ; les hook_variant restent les mêmes 5 clés
+# anglaises (taxonomie interne, jamais montrée au spectateur).
+_SYSTEM_FR = """Tu es spécialiste de l'accroche virale. À partir de
+l'essence d'un article, écris {n} accroches candidates DIFFÉRENTES — les
+6 à 12 premiers mots parlés qui doivent arrêter un pouce qui scrolle en
+1-2 secondes.
 
-def _hook_menu(content_mode: str) -> str:
+REGISTRE : français québécois naturel et soigné (ni joual lourd, ni
+français de France guindé), tutoiement systématique. REFORMULE l'essence
+en français idiomatique — ne calque JAMAIS la syntaxe anglaise, même si
+l'essence vient d'un article en anglais. Garde THC, CBD, SQDC et les noms
+propres inchangés. Évite les anglicismes (edibles→comestibles,
+vape/vaping→vapotage, high→planer/l'effet, weed→cannabis/pot,
+pre-roll→préroulé, strain→variété) et les tournures trop hexagonales
+(« c'est ouf », « grave », « kiffer », « du coup », « bah »).
+
+Chaque candidate doit utiliser une variante DIFFÉRENTE parmi :
+  shock_stat | contrarian | authority | curiosity_gap | listicle
+{hook_menu}
+
+Note chaque candidate toi-même, avec cette grille (même échelle qu'un
+éditeur en aval — sois honnête et critique, pas généreux) :
+
+  • hookability  (1-10) — un pouce qui scrolle s'arrêterait-il en 1 seconde
+                         si tu disais ça à voix haute ? 10 = effet whoa
+                         viscéral ; 1 = ton de manchette plate.
+  • specificity  (1-10) — nomme-t-elle un chiffre, une entité précise, ou
+                         un fait concret de l'essence ? 10 = net et
+                         concret ; 1 = généralité vague.
+
+N'invente AUCUN fait qui n'est pas dans l'essence ci-dessous."""
+
+
+def _hook_menu(content_mode: str, lang: str = "en") -> str:
+    if lang == "fr":
+        return (
+            "Pour du contenu scientifique, préfère authority/shock_stat ; "
+            "curiosity_gap si le résultat est vraiment surprenant."
+            if content_mode == "scientific" else
+            "Pour du contenu général, préfère shock_stat/contrarian/"
+            "curiosity_gap ; listicle seulement si l'article est "
+            "structurellement une liste."
+        )
     return (
         "Prefer authority/shock_stat for scientific content; curiosity_gap "
         "works if the result is genuinely surprising."
@@ -46,10 +96,23 @@ def _hook_menu(content_mode: str) -> str:
     )
 
 
-def _user_prompt(essence: Essence, n: int) -> str:
+def _user_prompt(essence: Essence, n: int, lang: str = "en") -> str:
     evidence_block = "\n".join(
         f"    {i + 1}. {e}" for i, e in enumerate(essence.evidence)
     )
+    if lang == "fr":
+        return (
+            f"ESSENCE\n"
+            f"  content_mode : {essence.content_mode}\n"
+            f"  domain       : {essence.domain}\n"
+            f"  core_claim   : {essence.core_claim}\n"
+            f"  mechanism    : {essence.mechanism}\n"
+            f"  evidence:\n"
+            f"{evidence_block}\n\n"
+            f"Écris {n} accroches candidates, chacune une variante "
+            f"différente, chacune auto-notée. Français québécois, "
+            f"tutoiement, reformulé — jamais calqué sur l'anglais."
+        )
     return (
         f"ESSENCE\n"
         f"  content_mode : {essence.content_mode}\n"
@@ -65,10 +128,15 @@ def _user_prompt(essence: Essence, n: int) -> str:
 async def pick_hook(app: Any, essence: Essence, n: int = 3) -> HookPick:
     """Un appel .ai() → n HookCandidates ; choisit mécaniquement le meilleur
     score composite (hookability pondérée plus fort que specificity, même
-    intuition que le composite de critic.py — pas une moyenne littérale)."""
+    intuition que le composite de critic.py — pas une moyenne littérale).
+
+    REEL_AF_LANG=fr bascule le prompt complet en français (voir _SYSTEM_FR) ;
+    la structure de sélection (score composite, HookBatch/HookPick) est
+    identique dans les deux langues."""
+    system = _SYSTEM_FR if LANG == "fr" else _SYSTEM
     result = await app.ai(
-        system=_SYSTEM.format(n=n, hook_menu=_hook_menu(essence.content_mode)),
-        user=_user_prompt(essence, n),
+        system=system.format(n=n, hook_menu=_hook_menu(essence.content_mode, LANG)),
+        user=_user_prompt(essence, n, LANG),
         schema=HookBatch,
         temperature=0.9,
     )

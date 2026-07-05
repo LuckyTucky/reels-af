@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from reel_af.models import AccentOverlay, Beat, Essence
+
+# REEL_AF_LANG=fr — même interrupteur que hook.py/compose.py/tts.py. Ces
+# surcouches (chiffres, entités nommées, traductions de jargon…) sont du
+# texte brûlé à l'écran comme les sous-titres — sans variante FR, elles
+# ressortaient en anglais même par-dessus une narration française.
+LANG = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
 
 # The default MUST be None. Every part of the prompt and schema is engineered
 # to make the model commit to a yes/no BEFORE constructing the overlay so it
@@ -84,8 +91,76 @@ _SYSTEM_PROMPT = (
 )
 
 
+# Variante FR — mêmes 6 patrons, exemples traduits/adaptés (pas de calque),
+# texte final toujours en français québécois (bon-stock/STYLE-FR.md).
+_SYSTEM_PROMPT_FR = (
+    "Tu décides si UN plan d'un reel vertical reçoit une surcouche éditoriale "
+    "par-dessus les sous-titres mot-à-mot déjà brûlés en haut-centre du cadre.\n\n"
+    "LE DÉFAUT EST emit_overlay=false. La plupart des plans n'en émettent pas. "
+    "Répète : la plupart des plans n'en émettent pas. Surcharger le cadre est "
+    "pire que ne rien ajouter. Si aucun patron ne s'applique sans ambiguïté, "
+    "emit_overlay DOIT être false. Ne fabrique pas de surcouches pour remplir "
+    "un quota.\n\n"
+    "Seuls six patrons canoniques sont permis. Exemples concrets :\n"
+    "  • number — la narration mentionne un chiffre précis à fixer pour un "
+    "spectateur en sourdine (« 47 000 $ », « 85 % », « 3 ÉTAPES »). Le chiffre "
+    "doit vraiment apparaître dans la narration de ce plan.\n"
+    "  • named_entity — une personne, un lieu, une organisation ou un produit "
+    "dont l'orthographe compte (« DRE CHEN, STANFORD », « L'HIPPOCAMPE »). Pas "
+    "un nom commun générique.\n"
+    "  • jargon_translation — la narration utilise un terme technique et une "
+    "traduction simple aiderait les spectateurs en sourdine (« INTRICATION = "
+    "LIEN FANTÔME »).\n"
+    "  • hook_title_card — SEULEMENT permis quand beat.role == 'hook'. Une "
+    "question ou affirmation percutante, 5-8 mots, qui devient la carte-titre.\n"
+    "  • reaction — ponctuation comique sur un plan parlé (« ATTENDS QUOI », "
+    "« PAS VRAI », « SI C'EST VRAI, WOW »). Seulement quand le script a "
+    "clairement ce moment.\n"
+    "  • list_marker — seulement quand le script est structuré en liste "
+    "numérotée (« ÉTAPE 2 DE 3 », « 1 SUR 3 »). Pas pour une énumération "
+    "générique.\n\n"
+    "Règles strictes :\n"
+    "  1. Si la narration de ce plan ne contient pas de chiffre à souligner, "
+    "d'entité nommée dont l'orthographe compte, de terme technique à "
+    "traduire, ou de moment émotionnel/structurel clair — emit_overlay DOIT "
+    "être false.\n"
+    "  2. hook_title_card est SEULEMENT valide quand beat.role == 'hook'. "
+    "Jamais pour un autre plan.\n"
+    "  3. Le texte de la surcouche fait 2-6 mots, EN FRANÇAIS QUÉBÉCOIS "
+    "(tutoiement si applicable, jamais de calque anglais). Le moteur de rendu "
+    "le met en majuscules — écris-le dans la casse que tu veux.\n"
+    "  4. position : hook_title_card → 'upper_third'. Tout le reste → "
+    "'lower_third' (à l'opposé des sous-titres).\n"
+    "  5. La surcouche doit apporter une information que la voix ne dit pas "
+    "explicitement mais dont le spectateur a besoin (la valeur exacte du "
+    "chiffre, l'orthographe du nom, le moment comique que l'audio ne peut "
+    "pas montrer).\n\n"
+    "Retourne une décision structurée : choisis emit_overlay en premier, puis "
+    "soit tu fixes overlay à un AccentOverlay valide, soit tu le laisses nul. "
+    "reasoning explique quel patron correspond, ou pourquoi aucun ne "
+    "s'applique (en français ou en anglais, peu importe — c'est un champ "
+    "de traçabilité interne, jamais montré au spectateur)."
+)
+
+
 def _build_user_prompt(beat: Beat, essence: Essence) -> str:
     evidence = "\n".join(f"  - {e}" for e in essence.evidence)
+    if LANG == "fr":
+        return (
+            f"INDEX DU PLAN : {beat.idx}\n"
+            f"RÔLE DU PLAN : {beat.role}\n"
+            f"DURÉE CIBLE DU PLAN : {beat.target_duration_s:.2f}s "
+            f"(clip Veo : {beat.veo_duration}s)\n"
+            f"NARRATION DU PLAN (texte parlé, verbatim) :\n"
+            f"  {beat.text!r}\n\n"
+            f"MODE DE CONTENU : {essence.content_mode}\n"
+            f"AFFIRMATION CENTRALE : {essence.core_claim}\n"
+            f"PREUVES :\n{evidence}\n\n"
+            f"Décide : ce plan mérite-t-il une surcouche éditoriale de "
+            f"niveau 2 ?\n"
+            f"Rappel : la plupart des plans doivent retourner "
+            f"emit_overlay=false."
+        )
     return (
         f"BEAT INDEX: {beat.idx}\n"
         f"BEAT ROLE: {beat.role}\n"
@@ -110,7 +185,7 @@ async def accent_for_beat(
     when one of the 6 canonical patterns is genuinely warranted."""
 
     decision = await app.ai(
-        system=_SYSTEM_PROMPT,
+        system=_SYSTEM_PROMPT_FR if LANG == "fr" else _SYSTEM_PROMPT,
         user=_build_user_prompt(beat, essence),
         schema=_AccentDecision,
     )

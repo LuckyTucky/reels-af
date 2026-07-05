@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 
 from agentfield.media_providers import OpenRouterProvider
-from PIL import Image
+from PIL import Image, ImageOps
 
 import reel_af.sdk_patches  # noqa: F401
 from reel_af.render import cost as cost_track
@@ -208,7 +208,12 @@ def _crop_to_9x16(src: Path, dest: Path, target_w: int = 720) -> Path:
     it 404s. We crop locally.
     """
     target_h = target_w * 16 // 9
-    img = Image.open(src).convert("RGB")
+    img = Image.open(src)
+    # Gemini images sometimes carry an EXIF orientation tag; PIL loads raw
+    # pixels and ignores it by default, so a landscape-tagged-as-portrait
+    # (or vice versa) image gets cropped/resized sideways downstream —
+    # exif_transpose() normalizes pixels to match the tag, then strips it.
+    img = ImageOps.exif_transpose(img).convert("RGB")
     w, h = img.size
     desired_ratio = 9 / 16
     cur_ratio = w / h

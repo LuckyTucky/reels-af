@@ -67,8 +67,23 @@ COMPOSITION (non-negotiable):
   will sit there. Do NOT compose anything important upper-center.
 - One unexpected element (unusual angle / object out of place / surprising
   color / dramatic single-source light) that catches the eye on frame one.
-- No text, letters, captions, or watermarks IN the image — subtitles are
-  added later in post.
+- No text, letters, captions, numbers, or watermarks IN the image — NOT
+  EVEN "example" text written on a whiteboard, monitor, page, or sign as
+  a prop. If the composition calls for a whiteboard/screen/document, show
+  it BLANK, blurred, angled away, or out of focus so no readable character
+  is visible. Subtitles are added later in post, in the reel's own
+  language — any text the image itself "writes" competes with them and,
+  worse, is very likely in the wrong language for a non-English reel.
+- HARD RULE, no exceptions: your image_prompt string itself must NEVER
+  contain a quoted word or short phrase meant to appear written in the
+  image (e.g. writing labeled 'Real Words' and 'False Words', or a
+  screen showing 'bed', 'pillow', 'sleep'). The image model renders
+  quoted strings LITERALLY as on-screen text — badly spelled, and in
+  whatever language you typed, which breaks non-English reels. Describe
+  the CONCEPT instead of the content: not "a screen showing the words
+  bed, pillow, sleep" but "a screen showing a word-list interface with
+  a highlighted missing entry" — implied through layout and composition,
+  never through actual legible words.
 
 GROUNDING:
 - visual_anchor MUST be one of the evidence items listed below, copied
