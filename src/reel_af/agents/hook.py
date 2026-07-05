@@ -17,10 +17,12 @@ from typing import Any
 from reel_af.models import Essence, HookBatch, HookCandidate, HookPick
 
 # REEL_AF_LANG=fr bascule hook.py + compose.py en français québécois (voir
-# bon-stock/STYLE-FR.md). extract.py reste inchangé (multilingue). Lu une
-# fois au chargement du module — c'est un interrupteur de projet, pas un
-# réglage par reel (contrairement à REEL_AF_ART_STYLE).
-LANG = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
+# bon-stock/STYLE-FR.md). extract.py reste inchangé (multilingue). Sert de
+# REPLI par défaut si aucun `lang` n'est passé par appel — comme
+# REEL_AF_ART_STYLE, `lang` est un paramètre PAR REEL (text_to_reel doit
+# pouvoir choisir fr/en par requête), pas juste un interrupteur figé au
+# démarrage du conteneur.
+LANG_DEFAULT = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
 
 _SYSTEM = """You are a viral-hook specialist. Given the essence of an
 article, write {n} DIFFERENT candidate opening hooks — the literal first
@@ -125,18 +127,24 @@ def _user_prompt(essence: Essence, n: int, lang: str = "en") -> str:
     )
 
 
-async def pick_hook(app: Any, essence: Essence, n: int = 3) -> HookPick:
+async def pick_hook(
+    app: Any, essence: Essence, n: int = 3, lang: str = "",
+) -> HookPick:
     """Un appel .ai() → n HookCandidates ; choisit mécaniquement le meilleur
     score composite (hookability pondérée plus fort que specificity, même
     intuition que le composite de critic.py — pas une moyenne littérale).
 
-    REEL_AF_LANG=fr bascule le prompt complet en français (voir _SYSTEM_FR) ;
-    la structure de sélection (score composite, HookBatch/HookPick) est
+    `lang` ("fr"/"en") bascule le prompt complet en français (voir
+    _SYSTEM_FR) ; vide = repli sur REEL_AF_LANG (LANG_DEFAULT). La
+    structure de sélection (score composite, HookBatch/HookPick) est
     identique dans les deux langues."""
-    system = _SYSTEM_FR if LANG == "fr" else _SYSTEM
+    resolved_lang = (lang or LANG_DEFAULT or "en").strip().lower()
+    system = _SYSTEM_FR if resolved_lang == "fr" else _SYSTEM
     result = await app.ai(
-        system=system.format(n=n, hook_menu=_hook_menu(essence.content_mode, LANG)),
-        user=_user_prompt(essence, n, LANG),
+        system=system.format(
+            n=n, hook_menu=_hook_menu(essence.content_mode, resolved_lang),
+        ),
+        user=_user_prompt(essence, n, resolved_lang),
         schema=HookBatch,
         temperature=0.9,
     )

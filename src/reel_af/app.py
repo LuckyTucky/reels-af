@@ -103,7 +103,7 @@ async def extract_essence(url: str) -> dict:
 
 
 @reel.reasoner()
-async def pick_hook(essence: dict) -> dict:
+async def pick_hook(essence: dict, lang: str = "") -> dict:
     """Phase 1.5 — Essence → meilleure accroche parmi 2-3 (mode article).
 
     Génère 2-3 candidats en UN appel .ai(), chacun auto-noté sur
@@ -112,17 +112,21 @@ async def pick_hook(essence: dict) -> dict:
     avec le mode sujet (hunters/critic/judge), dont ce reasoner s'inspire
     sans dupliquer toute la cascade — une seule essence, pas de recherche
     d'angle, juste de formulation.
+
+    `lang` ("fr"/"en") — vide = repli sur REEL_AF_LANG.
     """
     from reel_af.agents.hook import pick_hook as _pick_hook
     from reel_af.models import Essence
 
     e = Essence(**essence)
-    pick = await _pick_hook(app, e)
+    pick = await _pick_hook(app, e, lang=lang)
     return {"hook_pick": pick.model_dump()}
 
 
 @reel.reasoner()
-async def compose_script(essence: dict, chosen_hook: dict | None = None) -> dict:
+async def compose_script(
+    essence: dict, chosen_hook: dict | None = None, lang: str = "",
+) -> dict:
     """Phase 2 — Essence → ScriptDraft (one .ai() call).
 
     Fixed Hook → Mechanism → Payoff structure with inline Gemini TTS
@@ -130,14 +134,15 @@ async def compose_script(essence: dict, chosen_hook: dict | None = None) -> dict
     clause to echo a keyword from the hook so the reel rewatches.
 
     If chosen_hook is given (from reel_pick_hook), the hook is FIXED —
-    this call only writes mechanism/payoff around it.
+    this call only writes mechanism/payoff around it. `lang` ("fr"/"en")
+    — vide = repli sur REEL_AF_LANG.
     """
     from reel_af.agents.compose import compose_script as _compose
     from reel_af.models import Essence, HookCandidate
 
     e = Essence(**essence)
     hook = HookCandidate(**chosen_hook) if chosen_hook else None
-    script = await _compose(app, e, chosen_hook=hook)
+    script = await _compose(app, e, chosen_hook=hook, lang=lang)
     return {"script": script.model_dump()}
 
 
@@ -242,6 +247,7 @@ async def pick_best_narration(
 @reel.reasoner()
 async def synthesize_audio(
     narration: str, voice_tone: str, out_dir: str, target_wpm: int = 180,
+    lang: str = "",
 ) -> dict:
     """Sentence-by-sentence TTS + sample-accurate word timings.
 
@@ -252,6 +258,9 @@ async def synthesize_audio(
     ffprobe, then native-wave concatenated. Sentence boundaries are
     sample-accurate on the final timeline; words within a sentence
     are distributed by syllable count.
+
+    `lang` ("fr"/"en") pick une voix Gemini adaptée — vide = repli sur
+    REEL_AF_LANG.
     """
     from reel_af.render.tts import (
         strip_tts_tags,
@@ -259,7 +268,7 @@ async def synthesize_audio(
         voice_for_tone,
     )
 
-    voice = voice_for_tone(voice_tone)
+    voice = voice_for_tone(voice_tone, lang=lang)
     audio_path, word_timings = await _synth(
         narration=narration, voice=voice, out_dir=Path(out_dir),
         target_wpm=target_wpm,
@@ -320,18 +329,20 @@ async def plan_visuals(
 
 
 @reel.reasoner()
-async def plan_accents(beats: list[dict], essence: dict) -> dict:
+async def plan_accents(beats: list[dict], essence: dict, lang: str = "") -> dict:
     """Per-beat optional editorial overlay (parallel fan-out, biased to None).
 
     Six canonical patterns: number, named_entity, jargon_translation,
     hook_title_card, reaction, list_marker. Most beats return None.
+
+    `lang` ("fr"/"en") — vide = repli sur REEL_AF_LANG.
     """
     from reel_af.agents.accent import plan_beat_accents
     from reel_af.models import Beat, Essence
 
     beat_objs = [Beat(**b) for b in beats]
     e = Essence(**essence)
-    accents = await plan_beat_accents(app, beat_objs, e)
+    accents = await plan_beat_accents(app, beat_objs, e, lang=lang)
     return {
         "accents": [a.model_dump() if a is not None else None for a in accents],
     }
@@ -421,7 +432,7 @@ _REEL_RENDER_LOCK = asyncio.Semaphore(1)
 
 @reel.reasoner()
 async def article_to_reel(
-    url: str, out_dir: str | None = None, art_style: str = "",
+    url: str, out_dir: str | None = None, art_style: str = "", lang: str = "",
 ) -> dict:
     """Turn an article URL into a vertical viral reel.
 
@@ -433,20 +444,22 @@ async def article_to_reel(
 
     ``art_style`` : nom d'un preset visuel (ex. "style1") pour A/B tester
     un style d'image sans redémarrer — voir render/images.py.
+    ``lang`` : "fr" ou "en" ; vide = repli sur REEL_AF_LANG. Paramètre PAR
+    REEL, comme art_style — pas besoin de redémarrer pour changer.
 
     Example:
       curl -X POST http://localhost:8080/api/v1/execute/async/reel-af.reel_article_to_reel \\
         -H 'Content-Type: application/json' \\
-        -d '{"input":{"url":"https://example.com/article","art_style":"style1"}}'
+        -d '{"input":{"url":"https://example.com/article","art_style":"style1","lang":"fr"}}'
     """
     if "OPENROUTER_API_KEY" not in os.environ:
         return {"error": "OPENROUTER_API_KEY not set in env."}
     async with _REEL_RENDER_LOCK:
-        return await _article_to_reel_locked(url, out_dir, art_style)
+        return await _article_to_reel_locked(url, out_dir, art_style, lang)
 
 
 async def _article_to_reel_locked(
-    url: str, out_dir: str | None = None, art_style: str = "",
+    url: str, out_dir: str | None = None, art_style: str = "", lang: str = "",
 ) -> dict:
     run_id = uuid.uuid4().hex[:8]
     out_path = (
@@ -498,7 +511,7 @@ async def _article_to_reel_locked(
 
     # Phase 1.5 — meilleure accroche parmi 2-3 candidats
     t = time.time()
-    h_out = await app.call(f"{node}.reel_pick_hook", essence=essence)
+    h_out = await app.call(f"{node}.reel_pick_hook", essence=essence, lang=lang)
     timings["hook"] = round(time.time() - t, 1)
     chosen_hook = h_out["hook_pick"]["chosen"]
 
@@ -506,6 +519,7 @@ async def _article_to_reel_locked(
     t = time.time()
     c_out = await app.call(
         f"{node}.reel_compose_script", essence=essence, chosen_hook=chosen_hook,
+        lang=lang,
     )
     timings["compose"] = round(time.time() - t, 1)
     script = c_out["script"]
@@ -519,6 +533,7 @@ async def _article_to_reel_locked(
         run_id=run_id,
         timings=timings,
         art_style=art_style,
+        lang=lang,
     )
 
     cost_report = cost_track.write(out_path, app.execution_cost)
@@ -550,7 +565,7 @@ async def _article_to_reel_locked(
 
 @reel.reasoner()
 async def topic_to_reel(
-    topic: str, out_dir: str | None = None, art_style: str = "",
+    topic: str, out_dir: str | None = None, art_style: str = "", lang: str = "",
 ) -> dict:
     """Turn a topic string into a vertical viral reel.
 
@@ -561,6 +576,9 @@ async def topic_to_reel(
 
     ``art_style`` : nom d'un preset visuel (ex. "style1") pour A/B tester
     un style d'image sans redémarrer — voir render/images.py.
+    ``lang`` : réservé pour la voix/surcouches en aval (synthesize_audio,
+    plan_accents) — les hunters/narrator/judge restent en anglais pour
+    l'instant (mode sujet non localisé, voir bon-stock/STYLE-FR.md).
 
     Example:
       curl -X POST http://localhost:8080/api/v1/execute/async/reel-af.reel_topic_to_reel \\
@@ -570,11 +588,11 @@ async def topic_to_reel(
     if "OPENROUTER_API_KEY" not in os.environ:
         return {"error": "OPENROUTER_API_KEY not set in env."}
     async with _REEL_RENDER_LOCK:
-        return await _topic_to_reel_locked(topic, out_dir, art_style)
+        return await _topic_to_reel_locked(topic, out_dir, art_style, lang)
 
 
 async def _topic_to_reel_locked(
-    topic: str, out_dir: str | None = None, art_style: str = "",
+    topic: str, out_dir: str | None = None, art_style: str = "", lang: str = "",
 ) -> dict:
     run_id = uuid.uuid4().hex[:8]
     out_path = (
@@ -683,6 +701,7 @@ async def _topic_to_reel_locked(
         run_id=run_id,
         timings=timings,
         art_style=art_style,
+        lang=lang,
     )
 
     cost_report = cost_track.write(out_path, app.execution_cost)
@@ -727,6 +746,7 @@ async def _render_downstream(
     run_id: str,
     timings: dict[str, float],
     art_style: str = "",
+    lang: str = "",
 ) -> dict:
     """audio → cards/beats (parallel) → visuals/accents (parallel) →
     videos → stitch. Used by both entry points."""
@@ -739,6 +759,7 @@ async def _render_downstream(
         voice_tone="wonder",
         out_dir=str(media_dir),
         target_wpm=script["target_wpm"],
+        lang=lang,
     )
     timings["tts"] = round(time.time() - t, 1)
 
@@ -770,6 +791,7 @@ async def _render_downstream(
         f"{node}.reel_plan_accents",
         beats=beats,
         essence=essence,
+        lang=lang,
     ))
     v_out, ac_out = await asyncio.gather(visuals_task, accents_task)
     timings["visual_accent"] = round(time.time() - t, 1)

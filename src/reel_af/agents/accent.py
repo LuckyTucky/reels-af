@@ -10,11 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from reel_af.models import AccentOverlay, Beat, Essence
 
-# REEL_AF_LANG=fr — même interrupteur que hook.py/compose.py/tts.py. Ces
+# REEL_AF_LANG=fr — même bascule que hook.py/compose.py/tts.py. Ces
 # surcouches (chiffres, entités nommées, traductions de jargon…) sont du
 # texte brûlé à l'écran comme les sous-titres — sans variante FR, elles
-# ressortaient en anglais même par-dessus une narration française.
-LANG = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
+# ressortaient en anglais même par-dessus une narration française. Repli
+# par défaut si `lang` n'est pas passé par appel (paramètre par reel).
+LANG_DEFAULT = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
 
 # The default MUST be None. Every part of the prompt and schema is engineered
 # to make the model commit to a yes/no BEFORE constructing the overlay so it
@@ -143,9 +144,9 @@ _SYSTEM_PROMPT_FR = (
 )
 
 
-def _build_user_prompt(beat: Beat, essence: Essence) -> str:
+def _build_user_prompt(beat: Beat, essence: Essence, lang: str = "en") -> str:
     evidence = "\n".join(f"  - {e}" for e in essence.evidence)
-    if LANG == "fr":
+    if lang == "fr":
         return (
             f"INDEX DU PLAN : {beat.idx}\n"
             f"RÔLE DU PLAN : {beat.role}\n"
@@ -180,13 +181,17 @@ async def accent_for_beat(
     app: Any,
     beat: Beat,
     essence: Essence,
+    lang: str = "",
 ) -> AccentOverlay | None:
     """Single `.ai()` call. Returns None by default — only emits an overlay
-    when one of the 6 canonical patterns is genuinely warranted."""
+    when one of the 6 canonical patterns is genuinely warranted.
 
+    `lang` ("fr"/"en") bascule la surcouche en français ; vide = repli sur
+    REEL_AF_LANG (LANG_DEFAULT)."""
+    resolved_lang = (lang or LANG_DEFAULT or "en").strip().lower()
     decision = await app.ai(
-        system=_SYSTEM_PROMPT_FR if LANG == "fr" else _SYSTEM_PROMPT,
-        user=_build_user_prompt(beat, essence),
+        system=_SYSTEM_PROMPT_FR if resolved_lang == "fr" else _SYSTEM_PROMPT,
+        user=_build_user_prompt(beat, essence, resolved_lang),
         schema=_AccentDecision,
     )
 
@@ -216,12 +221,13 @@ async def plan_beat_accents(
     app: Any,
     beats: list[Beat],
     essence: Essence,
+    lang: str = "",
 ) -> list[AccentOverlay | None]:
     """Fan-out via `asyncio.gather`. Returns list aligned to `beats` by index."""
     if not beats:
         return []
     return list(
         await asyncio.gather(
-            *(accent_for_beat(app, beat, essence) for beat in beats)
+            *(accent_for_beat(app, beat, essence, lang) for beat in beats)
         )
     )

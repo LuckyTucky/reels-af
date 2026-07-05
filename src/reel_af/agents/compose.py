@@ -15,9 +15,10 @@ from reel_af.models import Essence, HookCandidate, ScriptDraft
 
 # REEL_AF_LANG=fr bascule ce module en français québécois (voir
 # bon-stock/STYLE-FR.md). extract.py reste inchangé (multilingue, source
-# → essence peu importe la langue de l'article). Lu une fois au chargement
-# du module — interrupteur de projet, pas un réglage par reel.
-LANG = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
+# → essence peu importe la langue de l'article). Repli par défaut si aucun
+# `lang` n'est passé par appel — `lang` est un paramètre PAR REEL (comme
+# REEL_AF_ART_STYLE), pas un interrupteur figé au démarrage du conteneur.
+LANG_DEFAULT = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
 
 # ────────────────────────────────────────────────────────────────────
 # Scientific-mode writing guide. Applied when essence.content_mode ==
@@ -484,7 +485,10 @@ def _user_prompt_fr(
 
 
 async def compose_script(
-    app: Any, essence: Essence, chosen_hook: HookCandidate | None = None,
+    app: Any,
+    essence: Essence,
+    chosen_hook: HookCandidate | None = None,
+    lang: str = "",
 ) -> ScriptDraft:
     """One .ai() call. Fixed Hook -> Mechanism -> Payoff -> Loop structure.
     Parameterized by content_mode. Inline TTS tags in the narration.
@@ -492,9 +496,11 @@ async def compose_script(
     If chosen_hook is given (from agents/hook.py's best-of-N selection),
     the hook is FIXED and this call only writes mechanism/payoff around it.
 
-    REEL_AF_LANG=fr bascule vers la variante française complète (voir
-    _system_prompt_fr / _user_prompt_fr, bon-stock/STYLE-FR.md)."""
-    if LANG == "fr":
+    `lang` ("fr"/"en") bascule vers la variante française complète (voir
+    _system_prompt_fr / _user_prompt_fr, bon-stock/STYLE-FR.md) ; vide =
+    repli sur REEL_AF_LANG (LANG_DEFAULT)."""
+    resolved_lang = (lang or LANG_DEFAULT or "en").strip().lower()
+    if resolved_lang == "fr":
         return await app.ai(
             system=_system_prompt_fr(essence.content_mode, chosen_hook),
             user=_user_prompt_fr(essence, chosen_hook),

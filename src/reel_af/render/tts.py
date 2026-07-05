@@ -58,12 +58,12 @@ _VOICE_BY_TONE: dict[str, str] = {
     "playful": "Puck",        # bright, conversational
 }
 
-# REEL_AF_LANG=fr — même interrupteur que hook.py/compose.py. Une seule
-# voix française pour l'instant (pas de mapping par ton) : les 30 voix
-# Gemini ont été testées sur une phrase FR (bon-stock/STYLE-FR.md),
-# Leda/Despina/Sulafat jugées trop « bébé » (susurrements), Puck retenue
-# par Luc le 2026-07-05.
-LANG = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
+# REEL_AF_LANG=fr — même bascule que hook.py/compose.py. Une seule voix
+# française pour l'instant (pas de mapping par ton) : les 30 voix Gemini
+# ont été testées sur une phrase FR (bon-stock/STYLE-FR.md), Leda/Despina/
+# Sulafat jugées trop « bébé » (susurrements), Puck retenue par Luc le
+# 2026-07-05. Repli par défaut si `lang` n'est pas passé par appel.
+LANG_DEFAULT = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
 _FR_VOICE = "Puck"
 
 _TAG_RE = re.compile(r"\[[^\]]*\]")
@@ -73,10 +73,11 @@ _SENTENCE_END = re.compile(r"[.!?]+(?:[\"'’”])?\s*$")
 # ───── Public helpers ────────────────────────────────────────────────
 
 
-def voice_for_tone(tone: str) -> str:
+def voice_for_tone(tone: str, lang: str = "") -> str:
     """Pick a Gemini voice that matches the script's tone.
-    En français (REEL_AF_LANG=fr), une seule voix fixe pour l'instant."""
-    if LANG == "fr":
+    En français (`lang="fr"`), une seule voix fixe pour l'instant."""
+    resolved_lang = (lang or LANG_DEFAULT or "en").strip().lower()
+    if resolved_lang == "fr":
         return _FR_VOICE
     return _VOICE_BY_TONE.get(tone, "Kore")
 
