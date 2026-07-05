@@ -206,12 +206,52 @@ async def _trim_clip(src: Path, out_path: Path, dur: float) -> None:
         )
 
 
+async def _trim_and_hold(
+    src: Path, out_path: Path, keep_dur: float, total_dur: float,
+) -> None:
+    """Coupe `src` à `keep_dur` s (jamais en plein milieu d'un plan — voir
+    l'appelant) PUIS gèle la dernière image jusqu'à `total_dur` si besoin.
+
+    Sans ce gel, abandonner le dernier plan tronqué raccourcit la VIDÉO mais
+    pas la narration (jamais rognée) — la voix continuerait de jouer alors
+    que l'outro a déjà commencé. Le gel garde vidéo et narration synchrones :
+    l'outro ne démarre qu'une fois la narration réellement terminée."""
+    # tpad DOIT précéder setpts=PTS-STARTPTS : dans l'autre ordre, ffmpeg
+    # calcule mal la durée du gel et l'ignore silencieusement (testé, bug
+    # d'interaction entre filtres — pas documenté, juste vérifié en pratique).
+    extra = max(0.0, total_dur - keep_dur)
+    vfilter = f"trim=end={keep_dur:.3f}"
+    if extra > 0.01:
+        vfilter += f",tpad=stop_mode=clone:stop_duration={extra:.3f}"
+    vfilter += ",setpts=PTS-STARTPTS"
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+        "-vf", vfilter, "-an",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "18",
+        "-r", str(FPS), "-movflags", "+faststart", str(out_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"stitch: gel du dernier plan échoué (exit {proc.returncode}): "
+            f"{stderr.decode(errors='replace')[-400:]}"
+        )
+
+
 async def _xfade_beats(
     clips: list[Path], out_path: Path, T: float, pool: list[str],
-) -> None:
+) -> list[float]:
     """Enchaîne les plans par fondus xfade — une transition piochée AU HASARD
     dans `pool` à chaque frontière. Les plans doivent avoir un rab >= T (rendu
-    avec tail_s) pour ne pas rogner leur temps « solo ». Sortie silencieuse."""
+    avec tail_s) pour ne pas rogner leur temps « solo ». Sortie silencieuse.
+
+    Renvoie `boundaries` : la position (dans la timeline finale compressée
+    par les fondus) où chaque plan atteint sa pleine opacité — boundaries[i]
+    = fin du plan i. Sert à couper proprement en fin de narration (jamais en
+    plein milieu d'un plan) plutôt qu'à une durée brute."""
     n = len(clips)
     if n < 2:
         raise RuntimeError("xfade: il faut au moins 2 plans.")
@@ -221,6 +261,7 @@ async def _xfade_beats(
     parts: list[str] = []
     cur = "[0:v]"
     cur_len = _probe_duration(clips[0])
+    boundaries = [cur_len]
     for k in range(1, n):
         offset = max(0.0, cur_len - T)
         trans = random.choice(pool)
@@ -231,6 +272,7 @@ async def _xfade_beats(
         )
         cur = out_lab
         cur_len = cur_len + _probe_duration(clips[k]) - T
+        boundaries.append(cur_len)
     cmd += [
         "-filter_complex", ";".join(parts), "-map", cur, "-an",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "18",
@@ -245,6 +287,7 @@ async def _xfade_beats(
             f"stitch: xfade beats échoué (exit {proc.returncode}): "
             f"{stderr.decode(errors='replace')[-600:]}"
         )
+    return boundaries
 
 
 def _shift_ass(ass_path: Path, delta_s: float) -> None:
@@ -462,6 +505,12 @@ async def _render_outro(
     box_w = int(TARGET_W * 0.62)
     box_h = int(TARGET_H * 0.42)
     if bg_video is not None:
+        # Départ pioché AU HASARD dans la source (même logique que l'intro,
+        # voir _render_source_clip) — sinon -stream_loop rejoue toujours le
+        # même segment depuis 00:00 puisque `duration` est presque toujours
+        # plus courte que la vidéo source (la boucle ne se déclenche jamais).
+        src_dur = _probe_duration(bg_video)
+        start = random.uniform(0.0, src_dur - duration) if src_dur > duration else 0.0
         filter_complex = (
             f"[0:v]scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,"
             f"crop={TARGET_W}:{TARGET_H},setsar=1,fps={FPS},format=yuv420p[bg];"
@@ -471,7 +520,7 @@ async def _render_outro(
         )
         cmd = [
             "ffmpeg", "-y", "-loglevel", "error",
-            "-stream_loop", "-1", "-i", str(bg_video),
+            "-stream_loop", "-1", "-ss", f"{start:.3f}", "-i", str(bg_video),
             "-i", str(logo),
         ]
     else:
@@ -704,11 +753,35 @@ async def stitch_reel(
     if transitions_on:
         try:
             xf = out_dir / "beats-xfade.mp4"
-            await _xfade_beats(beat_clips, xf, TRANSITION_S, TRANSITION_POOL)
-            if _probe_duration(xf) > narration_dur + 0.1:
+            boundaries = await _xfade_beats(beat_clips, xf, TRANSITION_S, TRANSITION_POOL)
+            # Le fondu intro→1er plan (plus bas) consomme INTRO_TRANSITION_S
+            # secondes du DÉBUT de beats_video (propriété du xfade : le clip
+            # receveur cède toujours ses T premières secondes au mélange).
+            # Sans compensation, la narration (calée sur intro_dur, jamais
+            # rognée) déborderait de T secondes sur l'outro. On vise donc
+            # narration_dur + T plans « pleins », pas juste narration_dur.
+            beats_target = narration_dur + (
+                INTRO_TRANSITION_S if intro_clip is not None else 0.0
+            )
+            if _probe_duration(xf) > beats_target + 0.1:
+                # Ne JAMAIS couper un plan à moitié : on coupe à la fin du
+                # dernier plan complet qui tient dans la cible. On GÈLE
+                # ensuite sa dernière image jusqu'à cette cible (sinon la
+                # vidéo finit avant la voix, et l'outro démarre pendant
+                # qu'elle joue encore par-dessus).
+                EPS = 0.15
+                fitting = [b for b in boundaries if b <= beats_target + EPS]
+                target = fitting[-1] if fitting else beats_target
                 trimmed = out_dir / "beats.mp4"
-                await _trim_clip(xf, trimmed, narration_dur)
+                await _trim_and_hold(xf, trimmed, target, beats_target)
                 xf = trimmed
+            elif _probe_duration(xf) < beats_target - 0.1:
+                # Rare : les plans (même complets) n'atteignent pas la cible.
+                # On gèle la toute dernière image jusqu'à la cible plutôt que
+                # de laisser un déficit (même bug, sens inverse).
+                held = out_dir / "beats.mp4"
+                await _trim_and_hold(xf, held, _probe_duration(xf), beats_target)
+                xf = held
             beats_video = xf
         except Exception as e:  # noqa: BLE001
             print(f"[stitch] transitions xfade échouées ({e}); coupes franches.")
@@ -717,9 +790,12 @@ async def stitch_reel(
     if beats_video is not None:
         beats_total = _probe_duration(beats_video)
         # Intro → premier plan : fondu dédié de INTRO_TRANSITION_S ("fade",
-        # jamais pioché dans le pool), pas un cut sec. beats_total reste la
-        # durée des PLANS SEULS (calculée juste au-dessus) — outro_start plus
-        # bas doit rester intro_dur + beats_total peu importe la fusion.
+        # jamais pioché dans le pool), pas un cut sec. Ce fondu consomme
+        # INTRO_TRANSITION_S secondes du DÉBUT de beats_video (propriété du
+        # xfade) — la vidéo combinée dure donc intro_dur + beats_total - T,
+        # pas intro_dur + beats_total. beats_total est corrigé du même T
+        # SEULEMENT si la fusion réussit, pour qu'outro_start (plus bas)
+        # tombe pile où l'outro démarre vraiment dans la vidéo.
         if intro_clip is not None:
             try:
                 merged = out_dir / "intro-plus-beats.mp4"
@@ -727,6 +803,7 @@ async def stitch_reel(
                     [intro_clip, beats_video], merged, INTRO_TRANSITION_S, ["fade"],
                 )
                 clip_paths.append(merged)
+                beats_total -= INTRO_TRANSITION_S
             except Exception as e:  # noqa: BLE001
                 print(f"[stitch] fondu intro→premier plan échoué ({e}); coupe sèche.")
                 clip_paths.append(intro_clip)
@@ -740,6 +817,7 @@ async def stitch_reel(
         # frontières), puis borner à la narration plan par plan.
         gardes: list[Path] = []
         acc = 0.0
+        last_kept_solo = 0.0
         EPS = 0.15
         for bc, beat in zip(beat_clips, beats):
             solo = float(beat.veo_duration)
@@ -751,15 +829,23 @@ async def stitch_reel(
             if acc >= narration_dur - EPS:
                 break
             if acc + solo > narration_dur + EPS:
-                coupe = src.with_name(src.stem + "-trim.mp4")
-                await _trim_clip(src, coupe, narration_dur - acc)
-                gardes.append(coupe)
-                acc = narration_dur
+                # Ce plan ne tiendrait qu'à moitié dans la narration restante
+                # → on l'abandonne plutôt que d'en montrer un fragment tronqué.
                 break
             gardes.append(src)
             acc += solo
+            last_kept_solo = solo
         if gardes:
             beat_clips = gardes
+        if gardes and acc < narration_dur - EPS:
+            # Le dernier plan gardé finit avant la narration (le suivant a
+            # été abandonné plutôt que tronqué) — on gèle sa dernière image
+            # pour combler l'écart, sinon la voix déborderait sur l'outro.
+            held = gardes[-1].with_name(gardes[-1].stem + "-held.mp4")
+            await _trim_and_hold(
+                gardes[-1], held, last_kept_solo, last_kept_solo + (narration_dur - acc),
+            )
+            beat_clips[-1] = held
         clip_paths.extend(beat_clips)
         beats_total = sum(_probe_duration(c) for c in beat_clips)
 

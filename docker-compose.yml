@@ -26,37 +26,23 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
+      # Structural/networking only — genuinely owned by compose. Every
+      # user-tunable REEL_AF_* knob lives in .env, which docker-compose.
+      # override.yml mounts live into /app/.env and app.py loads via
+      # load_dotenv() at process start.
+      #
+      # Why they were REMOVED from here (2026-07-05): declaring them here
+      # too — even with `${VAR:-default}` — bakes a fixed value into the
+      # container AT CREATION TIME. `docker compose restart` does not
+      # re-evaluate that substitution, so a later `.env` edit is silently
+      # ignored until the container is fully recreated (`up -d
+      # --force-recreate`) — python-dotenv's load_dotenv() also does not
+      # override an already-set env var by default, so the stale
+      # compose-baked value always won. This bit us for
+      # REEL_AF_INTRO_MAX_S: edited .env, restarted, saw zero change.
       AGENTFIELD_SERVER: http://control-plane:8080
       AGENT_CALLBACK_URL: http://reel-af:8002
       AGENT_NODE_ID: ${AGENT_NODE_ID:-reel-af}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      REEL_AF_MODEL: ${REEL_AF_MODEL:-openrouter/deepseek/deepseek-v4-pro}
-      # Advanced: point reasoning at any OpenAI-compatible endpoint. Empty
-      # values are treated as unset and fall back to OpenRouter.
-      REEL_AF_API_BASE: ${REEL_AF_API_BASE:-}
-      REEL_AF_API_KEY: ${REEL_AF_API_KEY:-}
-      REEL_AF_TTS_MODEL: ${REEL_AF_TTS_MODEL:-google/gemini-3.1-flash-tts-preview}
-      REEL_AF_IMAGE_MODEL: ${REEL_AF_IMAGE_MODEL:-openrouter/google/gemini-2.5-flash-image}
-      REEL_AF_VIDEO_MODEL: ${REEL_AF_VIDEO_MODEL:-openrouter/google/veo-3.1-lite}
-      # Plan de fin (outro logo Bon Stock). Fond vide = auto (épouse le logo).
-      REEL_AF_OUTRO_S: ${REEL_AF_OUTRO_S:-2.0}
-      REEL_AF_OUTRO_BG: ${REEL_AF_OUTRO_BG:-}
-      REEL_AF_LOGO: ${REEL_AF_LOGO:-}
-      # Signature vocale de fin (« Bon Stock loves cannabis! »).
-      REEL_AF_SIGNATURE: ${REEL_AF_SIGNATURE:-1}
-      REEL_AF_SIGNATURE_TEXT: ${REEL_AF_SIGNATURE_TEXT:-}
-      REEL_AF_SIGNATURE_VOICE: ${REEL_AF_SIGNATURE_VOICE:-Aoede}
-      REEL_AF_SIGNATURE_BG_VOLUME: ${REEL_AF_SIGNATURE_BG_VOLUME:-0.35}
-      # Intro/outro vidéo Envato (clips piochés au hasard dans bon-stock/intro
-      # et bon-stock/outro). Indicatif joué au début et à la fin.
-      REEL_AF_INTRO: ${REEL_AF_INTRO:-1}
-      REEL_AF_INTRO_MAX_S: ${REEL_AF_INTRO_MAX_S:-6}
-      REEL_AF_INTRO_BG_VOLUME: ${REEL_AF_INTRO_BG_VOLUME:-0.8}
-      REEL_AF_OUTRO_VIDEO: ${REEL_AF_OUTRO_VIDEO:-1}
-      # Transitions entre plans : fondus xfade aléatoires (liste séparée par des
-      # virgules). « none » = coupes franches. Durée du fondu en secondes.
-      REEL_AF_TRANSITIONS: ${REEL_AF_TRANSITIONS:-fade,dissolve,distance,pixelize}
-      REEL_AF_TRANSITION_S: ${REEL_AF_TRANSITION_S:-0.3}
       PORT: ${PORT:-8002}
     ports:
       - "${AGENT_NODE_PORT:-8002}:8002"
