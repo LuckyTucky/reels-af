@@ -254,11 +254,16 @@ class Beat(BaseModel):
             "to pick the Veo bucket; the final timing is audio-master."
         ),
     )
-    veo_duration: Literal[4, 6, 8] = Field(
+    veo_duration: Literal[3, 4, 6, 8] = Field(
         ...,
         description=(
             "Fixed Veo bucket for this beat's video clip. Picked from the "
-            "smallest bucket ≥ target_duration_s with a small safety margin."
+            "smallest bucket ≥ target_duration_s with a small safety margin. "
+            "3 is NOT a real Veo bucket — it only appears after planning/"
+            "beats.py splits a 6s beat into 2×3s for more images in ken-burns "
+            "mode (REEL_AF_SPLIT_LONG_PLANS). If REEL_AF_USE_VEO=true, a "
+            "split reel will send duration=3 to Veo, which may reject or "
+            "clamp it — untested combination."
         ),
     )
 

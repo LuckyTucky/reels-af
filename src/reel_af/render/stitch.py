@@ -32,6 +32,12 @@ from pathlib import Path
 _VIDEO_EXTS = {"mp4", "mov", "m4v", "webm", "mkv", "avi"}
 INTRO_MAX_S = float(os.getenv("REEL_AF_INTRO_MAX_S") or "6")
 
+# Fondu dédié intro → premier plan ken-burns (distinct du pool aléatoire
+# entre plans) : consomme les DERNIÈRES INTRO_TRANSITION_S secondes du clip
+# d'intro déjà rendu (durée INTRO_MAX_S) — le fondu démarre donc pile à
+# (INTRO_MAX_S - INTRO_TRANSITION_S). Toujours "fade", jamais pioché.
+INTRO_TRANSITION_S = float(os.getenv("REEL_AF_INTRO_TRANSITION_S") or "0.5")
+
 # Transitions entre beats : fondus xfade courts, piochés AU HASARD dans un
 # petit ensemble soigné. Durée réglable. Pour désactiver (coupes franches) :
 # REEL_AF_TRANSITIONS=none.
@@ -152,12 +158,16 @@ def _off(flag: str, default: str = "1") -> bool:
 async def _render_source_clip(src: Path, out_path: Path, max_dur: float) -> float:
     """Rend une vidéo quelconque en clip SILENCIEUX 1080×1920 (mêmes réglages
     codec que les beats, pour se concaténer proprement), plafonné à max_dur.
-    Renvoie la durée effective."""
-    dur = min(_probe_duration(src), max_dur)
+    Départ pioché AU HASARD dans la source si elle est plus longue que
+    max_dur (pas toujours 00:00) — plus de variété perçue avec un petit pool
+    de fichiers. Renvoie la durée effective."""
+    src_dur = _probe_duration(src)
+    dur = min(src_dur, max_dur)
+    start = random.uniform(0.0, src_dur - dur) if src_dur > dur else 0.0
     vfilter = (
         f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,"
         f"crop={TARGET_W}:{TARGET_H},setsar=1,fps={FPS},format=yuv420p,"
-        f"trim=end={dur:.3f},setpts=PTS-STARTPTS"
+        f"trim=start={start:.3f}:end={start + dur:.3f},setpts=PTS-STARTPTS"
     )
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
@@ -660,11 +670,11 @@ async def stitch_reel(
     # Step 2 — INTRO (vidéo Envato aléatoire, muette) puis beats.
     clip_paths: list[Path] = []
     intro_dur = 0.0
+    intro_clip: Path | None = None
     intro_src = None if _off("REEL_AF_INTRO") else _random_clip("intro")
     if intro_src is not None:
         intro_clip = out_dir / "intro.mp4"
         intro_dur = await _render_source_clip(intro_src, intro_clip, INTRO_MAX_S)
-        clip_paths.append(intro_clip)
 
     transitions_on = bool(TRANSITION_POOL) and len(beats) >= 2
     tail = TRANSITION_S if transitions_on else 0.0
@@ -705,9 +715,27 @@ async def stitch_reel(
             transitions_on = False
 
     if beats_video is not None:
-        clip_paths.append(beats_video)
         beats_total = _probe_duration(beats_video)
+        # Intro → premier plan : fondu dédié de INTRO_TRANSITION_S ("fade",
+        # jamais pioché dans le pool), pas un cut sec. beats_total reste la
+        # durée des PLANS SEULS (calculée juste au-dessus) — outro_start plus
+        # bas doit rester intro_dur + beats_total peu importe la fusion.
+        if intro_clip is not None:
+            try:
+                merged = out_dir / "intro-plus-beats.mp4"
+                await _xfade_beats(
+                    [intro_clip, beats_video], merged, INTRO_TRANSITION_S, ["fade"],
+                )
+                clip_paths.append(merged)
+            except Exception as e:  # noqa: BLE001
+                print(f"[stitch] fondu intro→premier plan échoué ({e}); coupe sèche.")
+                clip_paths.append(intro_clip)
+                clip_paths.append(beats_video)
+        else:
+            clip_paths.append(beats_video)
     else:
+        if intro_clip is not None:
+            clip_paths.append(intro_clip)
         # Coupes franches : retirer un éventuel rab (pour garder les bonnes
         # frontières), puis borner à la narration plan par plan.
         gardes: list[Path] = []
@@ -748,9 +776,10 @@ async def stitch_reel(
     if logo is not None:
         signature = await _signature_audio(out_dir.parent)
         sig_dur = _probe_duration(signature) if signature else 0.0
-        outro_dur = (
-            max(OUTRO_DURATION_S, sig_dur + 0.3) if sig_dur else OUTRO_DURATION_S
-        )
+        # L'outro dure au moins aussi longtemps que l'intro (symétrie visuelle,
+        # et l'indicatif de fin n'est plus tronqué prématurément) — mais jamais
+        # plus court que ce qu'il faut pour que la signature vocale se termine.
+        outro_dur = max(OUTRO_DURATION_S, intro_dur, sig_dur + 0.3 if sig_dur else 0.0)
         outro_video = None if _off("REEL_AF_OUTRO_VIDEO") else _random_clip("outro")
         outro_clip = out_dir / "outro-logo.mp4"
         await _render_outro(logo, outro_clip, duration=outro_dur, bg_video=outro_video)

@@ -317,12 +317,17 @@ async def generate_videos(
     visuals: list[dict],
     content_mode: str,
     out_dir: str,
+    art_style: str = "",
 ) -> dict:
     """Per-beat first-frame + Veo i2v (parallel fan-out).
 
     Two-tier fallback per beat: image fail → placeholder + ken-burns;
     Veo fail → real first-frame + ken-burns. A single beat failure
     never crashes the whole reel.
+
+    ``art_style`` names a preset from ``render.images._ART_STYLE_PRESETS``
+    (e.g. "style1") to override the default content_mode-based visual style
+    for this reel only — no restart needed to A/B test different looks.
     """
     from reel_af.models import Beat, BeatVisual
     from reel_af.render.video import generate_beat_videos
@@ -335,6 +340,7 @@ async def generate_videos(
         visuals=visual_objs,
         out_dir=media_dir,
         content_mode=content_mode,
+        art_style=art_style,
     )
     return {"artifacts": [a.model_dump(mode="json") for a in artifacts]}
 
@@ -389,7 +395,7 @@ _REEL_RENDER_LOCK = asyncio.Semaphore(1)
 
 @reel.reasoner()
 async def article_to_reel(
-    url: str, out_dir: str | None = None,
+    url: str, out_dir: str | None = None, art_style: str = "",
 ) -> dict:
     """Turn an article URL into a vertical viral reel.
 
@@ -399,18 +405,23 @@ async def article_to_reel(
     Un seul reel se rend à la fois (verrou global _REEL_RENDER_LOCK) :
     les lancements simultanés sont sérialisés par le moteur.
 
+    ``art_style`` : nom d'un preset visuel (ex. "style1") pour A/B tester
+    un style d'image sans redémarrer — voir render/images.py.
+
     Example:
       curl -X POST http://localhost:8080/api/v1/execute/async/reel-af.reel_article_to_reel \\
         -H 'Content-Type: application/json' \\
-        -d '{"input":{"url":"https://example.com/article"}}'
+        -d '{"input":{"url":"https://example.com/article","art_style":"style1"}}'
     """
     if "OPENROUTER_API_KEY" not in os.environ:
         return {"error": "OPENROUTER_API_KEY not set in env."}
     async with _REEL_RENDER_LOCK:
-        return await _article_to_reel_locked(url, out_dir)
+        return await _article_to_reel_locked(url, out_dir, art_style)
 
 
-async def _article_to_reel_locked(url: str, out_dir: str | None = None) -> dict:
+async def _article_to_reel_locked(
+    url: str, out_dir: str | None = None, art_style: str = "",
+) -> dict:
     run_id = uuid.uuid4().hex[:8]
     out_path = (
         Path(out_dir) if out_dir else (Path.cwd() / "output" / f"article-{run_id}")
@@ -473,6 +484,7 @@ async def _article_to_reel_locked(url: str, out_dir: str | None = None) -> dict:
         media_dir=media_dir,
         run_id=run_id,
         timings=timings,
+        art_style=art_style,
     )
 
     cost_report = cost_track.write(out_path, app.execution_cost)
@@ -503,7 +515,7 @@ async def _article_to_reel_locked(url: str, out_dir: str | None = None) -> dict:
 
 @reel.reasoner()
 async def topic_to_reel(
-    topic: str, out_dir: str | None = None,
+    topic: str, out_dir: str | None = None, art_style: str = "",
 ) -> dict:
     """Turn a topic string into a vertical viral reel.
 
@@ -512,18 +524,23 @@ async def topic_to_reel(
     delayed-reveal narration, then the same shared downstream path as
     article_to_reel.
 
+    ``art_style`` : nom d'un preset visuel (ex. "style1") pour A/B tester
+    un style d'image sans redémarrer — voir render/images.py.
+
     Example:
       curl -X POST http://localhost:8080/api/v1/execute/async/reel-af.reel_topic_to_reel \\
         -H 'Content-Type: application/json' \\
-        -d '{"input":{"topic":"philosophy of mind"}}'
+        -d '{"input":{"topic":"philosophy of mind","art_style":"style1"}}'
     """
     if "OPENROUTER_API_KEY" not in os.environ:
         return {"error": "OPENROUTER_API_KEY not set in env."}
     async with _REEL_RENDER_LOCK:
-        return await _topic_to_reel_locked(topic, out_dir)
+        return await _topic_to_reel_locked(topic, out_dir, art_style)
 
 
-async def _topic_to_reel_locked(topic: str, out_dir: str | None = None) -> dict:
+async def _topic_to_reel_locked(
+    topic: str, out_dir: str | None = None, art_style: str = "",
+) -> dict:
     run_id = uuid.uuid4().hex[:8]
     out_path = (
         Path(out_dir) if out_dir else (Path.cwd() / "output" / f"topic-{run_id}")
@@ -630,6 +647,7 @@ async def _topic_to_reel_locked(topic: str, out_dir: str | None = None) -> dict:
         media_dir=media_dir,
         run_id=run_id,
         timings=timings,
+        art_style=art_style,
     )
 
     cost_report = cost_track.write(out_path, app.execution_cost)
@@ -673,6 +691,7 @@ async def _render_downstream(
     media_dir: Path,
     run_id: str,
     timings: dict[str, float],
+    art_style: str = "",
 ) -> dict:
     """audio → cards/beats (parallel) → visuals/accents (parallel) →
     videos → stitch. Used by both entry points."""
@@ -727,6 +746,7 @@ async def _render_downstream(
         visuals=v_out["visuals"],
         content_mode=essence["content_mode"],
         out_dir=str(out_path),
+        art_style=art_style,
     )
     timings["media"] = round(time.time() - t, 1)
 

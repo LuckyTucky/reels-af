@@ -80,16 +80,20 @@ def plan_beats(script: ScriptDraft, audio_duration_s: float) -> list[Beat]:
             )
         )
 
-    # Découpe des plans les plus longs (8 s) en deux plans de 4 s : plus
-    # d'images, coupes plus fréquentes, plus de dynamisme. Les sous-titres ne
-    # sont PAS touchés (ils sont calés sur la narration, pas sur les plans).
-    # Chaque sous-plan génère sa propre image. Désactivable : REEL_AF_SPLIT_LONG_PLANS=0.
+    # Découpe des plans les plus longs (8 s → 2×4s, et 6 s → 2×3s depuis le
+    # 2026-07-04) en deux : plus d'images, coupes plus fréquentes, plus de
+    # dynamisme. Durée totale conservée à l'identique (split neutre). Les
+    # sous-titres ne sont PAS touchés (calés sur la narration, pas sur les
+    # plans). Chaque sous-plan génère sa propre image. Désactivable :
+    # REEL_AF_SPLIT_LONG_PLANS=0.
+    _SPLITTABLE = {8: 4, 6: 3}
     if (os.getenv("REEL_AF_SPLIT_LONG_PLANS") or "1").strip().lower() not in (
         "0", "false", "no", "off"
     ):
         reindexed: list[Beat] = []
         for b in beats:
-            if b.veo_duration == 8:
+            half = _SPLITTABLE.get(b.veo_duration)
+            if half is not None:
                 for _ in range(2):
                     reindexed.append(
                         Beat(
@@ -97,7 +101,7 @@ def plan_beats(script: ScriptDraft, audio_duration_s: float) -> list[Beat]:
                             role=b.role,  # type: ignore[arg-type]
                             text=b.text,
                             target_duration_s=b.target_duration_s / 2,
-                            veo_duration=4,  # type: ignore[arg-type]
+                            veo_duration=half,  # type: ignore[arg-type]
                         )
                     )
             else:
