@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from reel_af.models import Essence, ScriptDraft
+from reel_af.models import Essence, HookCandidate, ScriptDraft
 
 # ────────────────────────────────────────────────────────────────────
 # Scientific-mode writing guide. Applied when essence.content_mode ==
@@ -103,7 +103,9 @@ _TAG_VOCAB = """\
 """
 
 
-def _system_prompt(content_mode: str) -> str:
+def _system_prompt(
+    content_mode: str, chosen_hook: HookCandidate | None = None,
+) -> str:
     if content_mode == "scientific":
         word_target = "45-52 words"
         wpm = 175
@@ -135,14 +137,26 @@ def _system_prompt(content_mode: str) -> str:
         )
         mode_block = ""
 
+    if chosen_hook is not None:
+        hook_block = f"""  1. HOOK (FIXED — already chosen upstream, do not rewrite it)
+                       text         : "{chosen_hook.text}"
+                       hook_variant : {chosen_hook.hook_variant}
+                       Copy this hook VERBATIM into the `hook` and
+                       `hook_variant` fields. Do not paraphrase it, do not
+                       improve it, do not change a single word. Your job
+                       starts at step 2 — write the mechanism/payoff that
+                       best supports THIS hook."""
+    else:
+        hook_block = f"""  1. HOOK            — 6-10 spoken words. Picks ONE variant from:
+                       shock_stat | contrarian | authority | curiosity_gap | listicle
+                       Declare which variant you chose in `hook_variant`.
+                       {hook_menu}"""
+
     return f"""You are writing a 25-second vertical reel narration.
 
 The structure is FIXED. Do not deviate.
 
-  1. HOOK            — 6-10 spoken words. Picks ONE variant from:
-                       shock_stat | contrarian | authority | curiosity_gap | listicle
-                       Declare which variant you chose in `hook_variant`.
-                       {hook_menu}
+{hook_block}
 
   2. MECHANISM       — 2-4 sentences that explain the WHY behind the hook.
                        Each sentence is a coherent visual beat downstream
@@ -194,11 +208,24 @@ period ~400ms. If your narration has more than ~5 commas across the
 {mode_block}"""
 
 
-def _user_prompt(essence: Essence) -> str:
+def _user_prompt(
+    essence: Essence, chosen_hook: HookCandidate | None = None,
+) -> str:
     """Mirror arch_b_hook_first._body_from_hook's user payload shape, sourced
     from Essence instead of ArticleSummary."""
     evidence_block = "\n".join(
         f"    {i + 1}. {e}" for i, e in enumerate(essence.evidence)
+    )
+    closing = (
+        f'Write the ScriptDraft now. The hook is ALREADY CHOSEN: '
+        f'"{chosen_hook.text}" ({chosen_hook.hook_variant}) — copy it '
+        f"verbatim into `hook`/`hook_variant`. Build the mechanism_lines "
+        f"and payoff_line around it using the evidence above; the "
+        f"payoff_line lands on a word that callbacks the hook."
+        if chosen_hook is not None else
+        "Write the ScriptDraft now. The hook draws from `core_claim`; the "
+        "mechanism_lines unpack `mechanism` using the evidence above; the "
+        "payoff_line lands on a word that callbacks the hook."
     )
     return (
         f"ESSENCE (from the source article — use these facts, invent nothing)\n"
@@ -208,17 +235,20 @@ def _user_prompt(essence: Essence) -> str:
         f"  mechanism    : {essence.mechanism}\n"
         f"  evidence:\n"
         f"{evidence_block}\n\n"
-        f"Write the ScriptDraft now. The hook draws from `core_claim`; the "
-        f"mechanism_lines unpack `mechanism` using the evidence above; the "
-        f"payoff_line lands on a word that callbacks the hook."
+        f"{closing}"
     )
 
 
-async def compose_script(app: Any, essence: Essence) -> ScriptDraft:
+async def compose_script(
+    app: Any, essence: Essence, chosen_hook: HookCandidate | None = None,
+) -> ScriptDraft:
     """One .ai() call. Fixed Hook -> Mechanism -> Payoff -> Loop structure.
-    Parameterized by content_mode. Inline TTS tags in the narration."""
+    Parameterized by content_mode. Inline TTS tags in the narration.
+
+    If chosen_hook is given (from agents/hook.py's best-of-N selection),
+    the hook is FIXED and this call only writes mechanism/payoff around it."""
     return await app.ai(
-        system=_system_prompt(essence.content_mode),
-        user=_user_prompt(essence),
+        system=_system_prompt(essence.content_mode, chosen_hook),
+        user=_user_prompt(essence, chosen_hook),
         schema=ScriptDraft,
     )

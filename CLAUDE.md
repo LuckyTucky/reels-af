@@ -1,6 +1,6 @@
 # CLAUDE.md — brief du projet reels-af / Bon Stock
 
-*Contexte pour toute session d'assistant. Tenu à jour au fil du travail. Dernière révision : 2026-07-03.*
+*Contexte pour toute session d'assistant. Tenu à jour au fil du travail. Dernière révision : 2026-07-05.*
 
 ## Préférences de collaboration (Luc)
 
@@ -47,12 +47,16 @@ Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres
 ## Le pipeline (`src/reel_af/`)
 
 - `agents/extract.py` — URL → « essence ». Téléchargement HTTP + readability ; **repli navigateur headless (Playwright/Chromium)** pour les pages verrouillées par JavaScript **et** les blocages 403 ; **résout les liens Google News RSS**. Échec → `ERREUR.txt` dans le dossier du reel (jamais de dossier vide muet).
-- `agents/` — compose (script), hunters/critic/narrator/judge (mode sujet), visual, accent.
+- `agents/hook.py` — **mode article seulement** : génère 2-3 accroches candidates (variantes différentes), auto-notées sur hookability/spécificité, choisit mécaniquement la meilleure (pas d'appel juge séparé). Passée telle quelle à `compose.py`, qui écrit le mécanisme/payoff *autour* du hook déjà fixé.
+- `agents/compose.py` — Essence (+ hook déjà choisi) → ScriptDraft, un appel `.ai()`.
+- `agents/` (suite) — hunters/critic/narrator/judge (mode sujet — a déjà son propre mécanisme de sélection d'accroche, non touché), visual, accent.
 - `render/tts.py` — TTS Gemini (phrase par phrase, timings karaoké). Voix par ton.
-- `render/images.py`, `render/video.py` — génération d'images + ken-burns / Veo.
-- `render/stitch.py` — assemblage final : intro vidéo optionnelle → plans enchaînés par **fondus xfade** (transition piochée au hasard dans un pool, désactivable) ou coupes franches → sous-titres (libass, décalés si intro) + mux audio (indicatif au début/à la fin, narration au milieu, signature vocale sur l'outro) → **outro vidéo/logo** ; puis **auto-vérification**.
+- `render/images.py` — génération d'images ; **presets de style visuel** (`_ART_STYLE_PRESETS`, 10 styles, voir `bon-stock/STYLES.md`) sélectionnables par reel via `bash reel.sh <url> style3` (pas de redémarrage requis).
+- `render/video.py` — ken-burns / Veo.
+- `render/stitch.py` — assemblage final : intro vidéo optionnelle → **fondu dédié** (0,5 s, "fade") vers le premier plan ken-burns → plans enchaînés par **fondus xfade** (transition piochée au hasard dans un pool, désactivable) ou coupes franches → sous-titres (libass, décalés si intro) + mux audio (indicatif au début/à la fin, narration au milieu, signature vocale sur l'outro) → **outro vidéo/logo** (durée alignée sur l'intro) ; puis **auto-vérification**. Départ aléatoire piochée dans les vidéos source (intro/outro), pas toujours 00:00. Ne coupe jamais un plan à moitié en fin de reel (gèle la dernière image plutôt que tronquer).
 - `render/verify.py` — auto-vérification post-rendu (voir plus bas).
-- `planning/beats.py` — découpe les plans les plus longs (8 s) en deux plans de 4 s pour plus de dynamisme (chacun sa propre image) ; désactivable via `REEL_AF_SPLIT_LONG_PLANS=0`.
+- `render/cost.py` — écrit `cost.json` par reel (raisonnement + images + vidéo en dollars réels).
+- `planning/beats.py` — découpe les plans les plus longs (8 s → 2×4s, 6 s → 2×3s) pour plus de dynamisme (chacun sa propre image) ; désactivable via `REEL_AF_SPLIT_LONG_PLANS=0`.
 - `planning/` — beats, cards, safe_zone, font_metrics.
 - `app.py` — reasoners + points d'entrée (`article_to_reel`, `topic_to_reel`) + **le verrou de sérialisation**.
 
@@ -108,11 +112,13 @@ Retour arrière : `git checkout <tag>` puis reconstruire. Voir `ROLLBACK.md`.
 
 ## Backlog
 
-- Narration en **français**.
+- 👉 **PROCHAINE SESSION (2026-07-06)** : **narration en français** — version FR du pipeline (system prompts de `compose.py`/`hunters.py`/`narrator.py` actuellement tout en anglais ; voix Gemini TTS FR à choisir ; vérifier le rendu du karaoké/accents avec du texte français).
 - **Ton** de la signature vocale (ajustable via `.env`, en cours).
-- **Cadre d'accroche** viral (à adapter dans le reasoner de script ; utiliser le plugin `brand-voice`).
 - **Vérif des faits** via l'agent Critique.
 - **Pipeline en deux étapes (option)** : séparer `article_to_reel` en `article_to_script(url)` (extrait + compose, écrit `output/<id>/script.txt`, s'arrête là) puis `script_to_reel(dossier)` (reprend le texte — édité ou non — et termine audio/images/montage). Permettrait de relire/corriger la narration avant de dépenser images+vidéo. Idée de Luc (2026-07-05), approuvée en principe mais pas prioritaire — à faire en option, pas par défaut (ne pas casser le geste actuel en un clic).
+- ~~Cadre d'accroche viral~~ — fait (2026-07-05) : `agents/hook.py`, nouveau reasoner `pick_hook` en mode article (avant `compose_script`) — génère 2-3 accroches candidates auto-notées (hookability/spécificité, vocabulaire repris de `critic.py`), choisit mécaniquement la meilleure, la fixe pour `compose_script`. ~+0,02 $/reel. Le plugin `brand-voice` a été écarté (sert la cohérence de ton, pas la viralité — mauvais outil pour ce problème). Mode sujet non touché (a déjà son propre juge).
+- ~~10 presets de style visuel~~ — fait (2026-07-04/05) : `_ART_STYLE_PRESETS` dans `render/images.py`, sélectionnables par reel (`bash reel.sh <url> styleN`, aucun redémarrage requis). Liste et descriptions : [`bon-stock/STYLES.md`](bon-stock/STYLES.md).
+- ~~Correctifs de montage intro/outro~~ — fait (2026-07-04/05) : fondu dédié intro→premier plan, segment aléatoire dans les clips intro/outro (pas toujours 00:00), plus aucun plan coupé à moitié en fin de reel, sync audio/vidéo/outro corrigée. Voir commit `76566d3`.
 - ~~Suivi du coût par reel~~ — fait (2026-07-03) : `render/cost.py` écrit `cost.json` dans chaque dossier de reel (raisonnement + images + vidéo captés en dollars réels ; TTS non exposé par l'API OpenRouter, seulement le nombre de caractères).
 - ~~Tester un reel en mode Veo~~ — fait (2026-07-03), comparé sur le même article : Ken Burns ≈ 0,47 $/reel vs Veo ≈ 2,07 $/reel (~×4-5, jusqu'à 8 plans à 0,32 $ chacun si tous réussissent). **Décision de Luc : la qualité vidéo ne justifie pas le surcoût — Ken Burns reste le mode par défaut** (`REEL_AF_USE_VEO=false`). Veo reste disponible au besoin pour un reel exceptionnel (basculer `.env` + `docker compose restart reel-af`, sans oublier de repasser à `false` après).
 - ~~Éventuel logo sonore `CrazyTunes_Vocal-Logo_main.mp3`~~ — retiré du dépôt en v1.8.0 (remplacé par l'indicatif intro/outro).

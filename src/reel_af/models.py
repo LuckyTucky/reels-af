@@ -182,6 +182,50 @@ class ScriptDraft(BaseModel):
         )
 
 
+class HookCandidate(BaseModel):
+    """One self-scored candidate hook, from the article-mode hook reasoner
+    (agents/hook.py). Article mode's compose_script used to invent the hook
+    in one unaudited shot; this closes that gap by generating 2-3 candidates
+    and picking the best-scored one mechanically (no extra LLM judge call)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(
+        ..., description="The literal first 6-10 spoken words. Punctuated."
+    )
+    hook_variant: HookVariant
+    hookability: int = Field(
+        ..., ge=1, le=10,
+        description=(
+            "Would a scrolling thumb stop in 1 second if you said this "
+            "aloud? 10 = visceral wait-what; 1 = headline drone."
+        ),
+    )
+    specificity: int = Field(
+        ..., ge=1, le=10,
+        description=(
+            "Does it name a number, named entity, or concrete claim? "
+            "10 = sharp and concrete; 1 = vague generality."
+        ),
+    )
+    why: str = Field(..., description="1 sentence justifying the scores.")
+
+
+class HookBatch(BaseModel):
+    """Wrapper so the schema has a single top-level object (n candidates)."""
+
+    model_config = ConfigDict(extra="forbid")
+    candidates: list[HookCandidate] = Field(..., min_length=2, max_length=3)
+
+
+class HookPick(BaseModel):
+    """Mechanically-selected winner + audit trail of all candidates considered."""
+
+    model_config = ConfigDict(extra="forbid")
+    chosen: HookCandidate
+    all_candidates: list[HookCandidate]
+
+
 # ════════════════════════════════════════════════════════════════════
 # Phase 3: TTS — per-word timings
 # ════════════════════════════════════════════════════════════════════
@@ -544,6 +588,9 @@ __all__ = [
     "CriticOutput",
     "Essence",
     "EssenceCandidate",
+    "HookBatch",
+    "HookCandidate",
+    "HookPick",
     "HookVariant",
     "HuntBatch",
     "HunterAngle",

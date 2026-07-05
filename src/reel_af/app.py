@@ -103,18 +103,41 @@ async def extract_essence(url: str) -> dict:
 
 
 @reel.reasoner()
-async def compose_script(essence: dict) -> dict:
+async def pick_hook(essence: dict) -> dict:
+    """Phase 1.5 — Essence → meilleure accroche parmi 2-3 (mode article).
+
+    Génère 2-3 candidats en UN appel .ai(), chacun auto-noté sur
+    hookability/spécificité (vocabulaire repris de critic.py). Choisit
+    mécaniquement le mieux noté — pas de 2e appel juge. Comble l'écart
+    avec le mode sujet (hunters/critic/judge), dont ce reasoner s'inspire
+    sans dupliquer toute la cascade — une seule essence, pas de recherche
+    d'angle, juste de formulation.
+    """
+    from reel_af.agents.hook import pick_hook as _pick_hook
+    from reel_af.models import Essence
+
+    e = Essence(**essence)
+    pick = await _pick_hook(app, e)
+    return {"hook_pick": pick.model_dump()}
+
+
+@reel.reasoner()
+async def compose_script(essence: dict, chosen_hook: dict | None = None) -> dict:
     """Phase 2 — Essence → ScriptDraft (one .ai() call).
 
     Fixed Hook → Mechanism → Payoff structure with inline Gemini TTS
     audio tags. The schema's loop-back validator enforces the final
     clause to echo a keyword from the hook so the reel rewatches.
+
+    If chosen_hook is given (from reel_pick_hook), the hook is FIXED —
+    this call only writes mechanism/payoff around it.
     """
     from reel_af.agents.compose import compose_script as _compose
-    from reel_af.models import Essence
+    from reel_af.models import Essence, HookCandidate
 
     e = Essence(**essence)
-    script = await _compose(app, e)
+    hook = HookCandidate(**chosen_hook) if chosen_hook else None
+    script = await _compose(app, e, chosen_hook=hook)
     return {"script": script.model_dump()}
 
 
@@ -470,9 +493,17 @@ async def _article_to_reel_locked(
     timings["extract"] = round(time.time() - t, 1)
     essence = e_out["essence"]
 
-    # Phase 2 — compose
+    # Phase 1.5 — meilleure accroche parmi 2-3 candidats
     t = time.time()
-    c_out = await app.call(f"{node}.reel_compose_script", essence=essence)
+    h_out = await app.call(f"{node}.reel_pick_hook", essence=essence)
+    timings["hook"] = round(time.time() - t, 1)
+    chosen_hook = h_out["hook_pick"]["chosen"]
+
+    # Phase 2 — compose (hook déjà fixé)
+    t = time.time()
+    c_out = await app.call(
+        f"{node}.reel_compose_script", essence=essence, chosen_hook=chosen_hook,
+    )
     timings["compose"] = round(time.time() - t, 1)
     script = c_out["script"]
 
@@ -500,6 +531,7 @@ async def _article_to_reel_locked(
         "url": url,
         "hook": script["hook"],
         "hook_variant": script["hook_variant"],
+        "hookability_score": chosen_hook["hookability"],
         "content_mode": essence["content_mode"],
         "domain": essence["domain"],
         "run_id": run_id,
