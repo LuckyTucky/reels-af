@@ -22,6 +22,7 @@ from pathlib import Path
 import pysubs2
 
 from reel_af.models import AccentOverlay, Beat, Card
+from reel_af.planning.font_metrics import MAX_CHARS_PER_LINE, measured_width
 from reel_af.planning.safe_zone import (
     ACCENT_FILL,
     ACCENT_FONT_PX,
@@ -31,7 +32,9 @@ from reel_af.planning.safe_zone import (
     ACCENT_UPPER_Y_PCT,
     CANVAS_H,
     CANVAS_W,
+    SAFE_W,
     SUBTITLE_FILL,
+    SUBTITLE_FONT_PX,
     SUBTITLE_STROKE,
 )
 
@@ -58,6 +61,39 @@ _BURST_FONT_PX = 170                  # single word — give it room
 _BURST_Y_PCT = 0.74                   # well into bottom-third, separated
                                       # from accent overlays at 0.62
 _BURST_STROKE_PX = 10                 # thick stroke for any background
+
+# ── Auto-fit : empêche un mot/accent long de déborder des bords du cadre ──
+# Les tailles ci-dessus sont fixes ; un mot long (ex. « Saint-Lin-Laurentides »)
+# dépasse alors les 1080 px et se fait couper des deux côtés. On réduit la
+# police juste assez pour que le plus large « jeton » insécable tienne dans
+# la largeur visée (centrée), en s'appuyant sur la calibration de font_metrics :
+# MAX_CHARS_PER_LINE unités de largeur moyenne remplissent SAFE_W à SUBTITLE_FONT_PX.
+_PX_PER_UNIT_REF = SAFE_W / MAX_CHARS_PER_LINE   # px par unité-caractère à 80 px
+_BURST_MARGIN_PX = 60                 # marge latérale visée pour le mot karaoké
+_ACCENT_MARGIN_PX = 40                # marge latérale visée pour l'accent
+_BURST_MIN_PX = 56                    # plancher de lisibilité
+_ACCENT_MIN_PX = 46
+
+
+def _fit_fontsize(text: str, base_px: int, margin_px: int, min_px: int) -> int:
+    """Plus grande taille ≤ base_px à laquelle le jeton le plus large de
+    `text` tient dans (CANVAS_W - 2*margin_px), centré. libass ne coupe
+    jamais À L'INTÉRIEUR d'un mot : c'est donc le mot le plus long qui
+    contraint la taille. Évite le débordement latéral hors écran."""
+    widest = max((measured_width(tok) for tok in text.split()), default=0.0)
+    if widest <= 0:
+        return base_px
+    target_w = CANVAS_W - 2 * margin_px
+    needed_px = widest * _PX_PER_UNIT_REF * (base_px / SUBTITLE_FONT_PX)
+    if needed_px <= target_w:
+        return base_px
+    return max(min_px, int(base_px * target_w / needed_px))
+
+
+def _fs_prefix(text: str, base_px: int, margin_px: int, min_px: int) -> str:
+    """Préfixe ASS `{\\fsN}` si le texte doit être rétréci, sinon ''."""
+    fs = _fit_fontsize(text, base_px, margin_px, min_px)
+    return "" if fs >= base_px else "{\\fs%d}" % fs
 
 
 def _make_sub_style(font_name: str) -> pysubs2.SSAStyle:
@@ -132,6 +168,10 @@ def _emit_card_events(ssa: pysubs2.SSAFile, cards: list[Card]) -> None:
                 txt = txt[:-1]
             if not txt:
                 continue
+            # Rétrécit la police si le mot est trop large pour le cadre.
+            txt = _fs_prefix(
+                txt, _BURST_FONT_PX, _BURST_MARGIN_PX, _BURST_MIN_PX
+            ) + txt
             ssa.events.append(
                 pysubs2.SSAEvent(
                     start=w_start_ms,
@@ -202,12 +242,16 @@ def build_reel_ass_with_accents(
         style_name = (
             "AccentUpper" if accent.position == "upper_third" else "AccentLower"
         )
+        accent_txt = accent.text.upper()
+        accent_txt = _fs_prefix(
+            accent_txt, ACCENT_FONT_PX, _ACCENT_MARGIN_PX, _ACCENT_MIN_PX
+        ) + accent_txt
         ssa.events.append(
             pysubs2.SSAEvent(
                 start=start_ms,
                 end=end_ms,
                 style=style_name,
-                text=accent.text.upper(),
+                text=accent_txt,
                 layer=2,
             )
         )

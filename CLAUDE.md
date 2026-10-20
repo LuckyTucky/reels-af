@@ -1,6 +1,6 @@
 # CLAUDE.md — brief du projet reels-af / Bon Stock
 
-*Contexte pour toute session d'assistant. Tenu à jour au fil du travail. Dernière révision : 2026-07-05.*
+*Contexte pour toute session d'assistant. Tenu à jour au fil du travail. Dernière révision : 2026-10-20.*
 
 ## Préférences de collaboration (Luc)
 
@@ -41,8 +41,9 @@ Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres
 ## Lancer un reel
 
 - `bash reel.sh <url>` (mode article) ou `bash reel.sh "un sujet"` (mode sujet). POST async vers :8090.
-- **Le moteur sérialise : UN seul reel rendu à la fois** (un `asyncio.Semaphore(1)` global dans `app.py`). Lancer plusieurs reels = ils font la file automatiquement. Plus de ralentissement parallèle, quelle que soit la méthode (terminal, bouton 🎬, script).
-- Sortie : `output/article-<id>/reel.mp4` (ou `topic-<id>`).
+- **`http://localhost:8092/texte`** — « l'usine à reels » : page servie directement par l'agent reel-af (pas le control-plane, verrouillé/CORS strict — voir `CONSIGNE-CLAUDE-CODE-texte-vers-reel.md`). Colle un texte, choisis mode (brute/verbatim), langue, un ou plusieurs styles, une voix → `POST /api/reel-af/execute/reel_text_to_reel`, relayé côté serveur (proxy `aiohttp`, jamais de CORS) vers le control-plane. Styles et voix sont chargés dynamiquement via `GET /api/reel-af/presets` (source unique : `render/images.STYLE_UI_META` + `render/tts.VOICE_PRESETS`) — ajouter un style ou une voix ne touche jamais le HTML.
+- **Le moteur sérialise : UN seul reel rendu à la fois** (un `asyncio.Semaphore(1)` global dans `app.py`). Lancer plusieurs reels = ils font la file automatiquement. Plus de ralentissement parallèle, quelle que soit la méthode (terminal, bouton 🎬, script, page `/texte`).
+- Sortie : `output/article-<id>/reel.mp4` (ou `topic-<id>`, ou `text-<id>`).
 
 ## Le pipeline (`src/reel_af/`)
 
@@ -50,15 +51,16 @@ Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres
 - `agents/hook.py` — **mode article seulement** : génère 2-3 accroches candidates (variantes différentes), auto-notées sur hookability/spécificité, choisit mécaniquement la meilleure (pas d'appel juge séparé). Passée telle quelle à `compose.py`, qui écrit le mécanisme/payoff *autour* du hook déjà fixé.
 - `agents/compose.py` — Essence (+ hook déjà choisi) → ScriptDraft, un appel `.ai()`.
 - `agents/` (suite) — hunters/critic/narrator/judge (mode sujet — a déjà son propre mécanisme de sélection d'accroche, non touché), visual, accent.
-- `render/tts.py` — TTS Gemini (phrase par phrase, timings karaoké). Voix par ton.
-- `render/images.py` — génération d'images ; **presets de style visuel** (`_ART_STYLE_PRESETS`, 10 styles, voir `bon-stock/STYLES.md`) sélectionnables par reel via `bash reel.sh <url> style3` (pas de redémarrage requis).
+- `render/tts.py` — TTS Gemini (phrase par phrase, timings karaoké). Voix par ton, ou par **`voice_preset`** explicite (`VOICE_PRESETS`, voice1-voice10, text_to_reel seulement — voice1 = voix actuelle en prod). Rythme : bande de tolérance ±20% (`_PACE_TOLERANCE`) autour du débit cible — les phrases dans la bande gardent leur prise naturelle intacte (facteur 1.0), seules celles qui en sortent vraiment sont ramenées au bord de la bande (pas au centre) via `atempo`. Testé (2026-07-05) : instructions de rythme en langage naturel envoyées à Gemini TTS (`_PACING_INSTRUCTIONS`) n'ont **aucun effet mesurable** sur la variance — la phrase de clôture ressort systématiquement plus lente, y compris sur un autre moteur (Kokoro), donc ce n'est pas un bug Gemini mais une emphase naturelle du modèle sur les phrases conclusives.
+- `render/images.py` — génération d'images ; **presets de style visuel** (`_ART_STYLE_PRESETS`, 10 styles, voir `bon-stock/STYLES.md`) sélectionnables par reel via `bash reel.sh <url> style3` (pas de redémarrage requis). `STYLE_UI_META` = métadonnée FR (nom/description/palette) servie à l'interface `/texte` via `/api/reel-af/presets` — ajouter un style11 : une entrée ici + une dans `_ART_STYLE_PRESETS`, rien d'autre.
 - `render/video.py` — ken-burns / Veo.
 - `render/stitch.py` — assemblage final : intro vidéo optionnelle → **fondu dédié** (0,5 s, "fade") vers le premier plan ken-burns → plans enchaînés par **fondus xfade** (transition piochée au hasard dans un pool, désactivable) ou coupes franches → sous-titres (libass, décalés si intro) + mux audio (indicatif au début/à la fin, narration au milieu, signature vocale sur l'outro) → **outro vidéo/logo** (durée alignée sur l'intro) ; puis **auto-vérification**. Départ aléatoire piochée dans les vidéos source (intro/outro), pas toujours 00:00. Ne coupe jamais un plan à moitié en fin de reel (gèle la dernière image plutôt que tronquer).
 - `render/verify.py` — auto-vérification post-rendu (voir plus bas).
 - `render/cost.py` — écrit `cost.json` par reel (raisonnement + images + vidéo en dollars réels).
 - `planning/beats.py` — découpe les plans les plus longs (8 s → 2×4s, 6 s → 2×3s) pour plus de dynamisme (chacun sa propre image) ; désactivable via `REEL_AF_SPLIT_LONG_PLANS=0`.
 - `planning/` — beats, cards, safe_zone, font_metrics.
-- `app.py` — reasoners + points d'entrée (`article_to_reel`, `topic_to_reel`) + **le verrou de sérialisation**.
+- `app.py` — reasoners + points d'entrée (`article_to_reel`, `topic_to_reel`, `text_to_reel`) + **le verrou de sérialisation** + les routes de l'interface `/texte` (statique + proxy CORS + `/api/reel-af/presets`).
+- `text_to_reel` — texte collé (pas d'URL) → reel, mode `brute` (hook.py + compose.py tournent normalement sur le texte, comme article privé de l'extraction) ou `verbatim` (le texte devient la narration telle quelle, aucune réécriture — `ScriptDraft.skip_loop_check` désactive la validation loop-back pour ce cas). `art_style`, `lang`, `voice_preset` tous par-reel. Sortie `output/text-<id>/`.
 
 ## Marque Bon Stock (`bon-stock/`)
 
@@ -88,6 +90,7 @@ Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres
 5. **Ne PAS lancer git dans le dépôt monté depuis le sandbox/Cowork** : le décalage de permissions laisse des `.git/*.lock` que l'utilisateur doit `rm`. → **Préparer les commandes git pour que Luc les lance dans SON Terminal.**
 6. **Sérialisation** : un reel à la fois (verrou moteur). Ne pas se fier à la méthode de lancement.
 7. **Remotes git** : `Agent-Field/reels-af` (le repo template d'origine) est un dépôt tiers — Luc n'y a **pas** les droits d'écriture. Depuis 2026-07-03, `origin` pointe vers son fork **`LuckyTucky/reels-af`** (créé via `gh repo fork --remote`) ; `upstream` = `Agent-Field/reels-af` en lecture seule. `git push` pousse donc vers le fork. Auth GitHub gérée par `gh auth login` (déjà fait, pas de mot de passe à ressaisir).
+8. **Montage Docker de FICHIER UNIQUE peut se figer** (`./texte-vers-reel.html:/app/texte-vers-reel.html:ro`), contrairement à un montage de DOSSIER (`./src:/app/src:ro`) qui suit toujours les modifs en direct. Repéré le 2026-07-06 : après une modif de `texte-vers-reel.html`, le fichier servi par le conteneur restait l'ancienne version (taille/horodatage différents du fichier réel) même sans toucher Docker — un `docker compose restart reel-af` a suffi à resynchroniser. Si une page statique montée en fichier seul semble ne pas refléter une modif, comparer `curl -sSI http://localhost:8092/<route>` (`content-length`/`last-modified`) avec le fichier réel sur disque avant de chercher un bug ailleurs.
 
 ## Auto-vérification post-rendu (`render/verify.py`)
 
@@ -112,11 +115,34 @@ Retour arrière : `git checkout <tag>` puis reconstruire. Voir `ROLLBACK.md`.
 
 ## Backlog
 
-- 👉 **PROCHAINE SESSION (2026-07-06)** : **narration en français** — version FR du pipeline (system prompts de `compose.py`/`hunters.py`/`narrator.py` actuellement tout en anglais ; voix Gemini TTS FR à choisir ; vérifier le rendu du karaoké/accents avec du texte français).
+- ~~**Modèle de raisonnement périmé**~~ — fait (reprise 2026-10-20) : après des mois
+  de pause, `anthropic/claude-sonnet-4` renvoyait 404 « No endpoints found » sur
+  OpenRouter (modèle retiré). Corrigé : `.env` → `openrouter/anthropic/claude-sonnet-5.5`.
+  ⚠️ Après avoir changé un modèle dans `.env`, **recréer** le conteneur
+  (`docker compose up -d --force-recreate reel-af`) — un simple `restart` peut
+  conserver l'ancienne valeur substituée par docker-compose. Option plus durable
+  contre ce piège de reprise : alias `~anthropic/claude-sonnet-latest` (auto-suit
+  la dernière version).
+- ~~**Typographie qui débordait du cadre**~~ — fait (2026-10-20) : les mots longs
+  (ex. « Saint-Lin-Laurentides ») et les accents longs sortaient des DEUX bords de
+  l'écran à taille fixe (170 px karaoké / 110 px accent). Corrigé dans
+  `render/subtitles.py` : `_fit_fontsize` réduit la police juste assez pour que le
+  jeton insécable le plus large tienne dans le cadre (calibré sur `SAFE_W` /
+  `MAX_CHARS_PER_LINE` de `font_metrics`) ; les mots courts gardent leur pleine
+  taille de 170 px (effet punchy préservé). Vérifié de visu sur un reel SQDC.
+- **Déballer les liens Google `google.com/url?...`** (backlog, reprise 2026-10-20) :
+  les nouvelles de la Veille arrivent souvent en liens redirigés Google que
+  l'extracteur ne résout PAS (il résout déjà Google News RSS, mais pas ces `/url?`).
+  Le bouton 🎬 bute donc dessus → il faut l'URL directe. Correctif proposé : lire le
+  paramètre `url=` dans `agents/extract.py` avant le téléchargement.
 - **Ton** de la signature vocale (ajustable via `.env`, en cours).
 - **Voix de marque (v2, après le français Gemini)** : évaluer **OmniVoice Studio** (local, open-source, clonage + *voice design*, backend FastAPI + serveur MCP) pour se **façonner une voix Bon Stock distinctive** (voire cloner une voix québécoise) et régler la **signature vocale**. Décision (2026-07-05) : *pas un prérequis au français* — Gemini d'abord pour valider le contenu, OmniVoice ensuite si la voix générique déçoit. Beta + infra ML locale + licence FSL à confirmer pour usage commercial.
+- **ElevenLabs (v3)** à évaluer plus tard comme alternative TTS — réputé très bon sur le rythme/l'intonation contextuelle (notre point faible actuel avec Gemini). Contrairement à Gemini/Kokoro/Orpheus (tous via OpenRouter, un changement de nom de modèle suffit), **ElevenLabs n'est pas sur OpenRouter** : nécessite un compte + clé API séparés, un nouveau code d'intégration (format d'API différent), et un suivi de coût séparé de `cost.json`. Noté au backlog le 2026-07-05 plutôt que fait à chaud — pas urgent, le compromis "variation naturelle modérée" (voir `render/tts.py:_PACE_TOLERANCE`) satisfait Luc pour l'instant.
 - **Vérif des faits** via l'agent Critique.
 - **Pipeline en deux étapes (option)** : séparer `article_to_reel` en `article_to_script(url)` (extrait + compose, écrit `output/<id>/script.txt`, s'arrête là) puis `script_to_reel(dossier)` (reprend le texte — édité ou non — et termine audio/images/montage). Permettrait de relire/corriger la narration avant de dépenser images+vidéo. Idée de Luc (2026-07-05), approuvée en principe mais pas prioritaire — à faire en option, pas par défaut (ne pas casser le geste actuel en un clic).
+- ~~Test navigateur de l'interface `/texte`~~ — fait (2026-07-06) par Luc : styles, voix et vraies photos s'affichent bien. Corrigé au passage : bug d'affichage préexistant dans `texte-vers-reel.html` (les bandes de couleur de repli cachaient TOUJOURS les vraies photos, injectées inconditionnellement par-dessus au lieu de seulement au `onerror`) + un montage Docker de fichier unique figé (voir piège dur #8) qui servait une version périmée de la page après une modif.
+- ~~Narration en français~~ — fait (2026-07-05) : system prompts FR pour `hook.py`/`compose.py`/`accent.py`, voix Gemini fixe (Puck, retenue après test des 30 voix — voir `bon-stock/STYLE-FR.md`), `lang` threadé comme paramètre par reel partout dans le pipeline (repli `REEL_AF_LANG` si absent). Bugs trouvés et corrigés en testant : texte anglais qui fuitait dans les images, accords de genre, débordement de carte sur mots longs, rotation EXIF, syllabes accentées sous-comptées.
+- ~~« Usine à reels » — `text_to_reel` + interface `/texte`~~ — fait (2026-07-05/06) : nouveau point d'entrée `text_to_reel` (modes `brute`/`verbatim`), page `texte-vers-reel.html` servie par l'agent lui-même (proxy CORS vers le control-plane, verrouillé), 10 styles + **10 voix** (`voice_preset`, voir `render/tts.VOICE_PRESETS`) chargés dynamiquement — ajouter un style/une voix ne touche jamais le HTML. `styles/style7.jpg` généré. Voir `CONSIGNE-CLAUDE-CODE-texte-vers-reel.md` pour le détail de conception (CORS, proxy). Reste à valider : vrai test dans un navigateur par Luc (voir ci-dessus).
 - ~~Cadre d'accroche viral~~ — fait (2026-07-05) : `agents/hook.py`, nouveau reasoner `pick_hook` en mode article (avant `compose_script`) — génère 2-3 accroches candidates auto-notées (hookability/spécificité, vocabulaire repris de `critic.py`), choisit mécaniquement la meilleure, la fixe pour `compose_script`. ~+0,02 $/reel. Le plugin `brand-voice` a été écarté (sert la cohérence de ton, pas la viralité — mauvais outil pour ce problème). Mode sujet non touché (a déjà son propre juge).
 - ~~10 presets de style visuel~~ — fait (2026-07-04/05) : `_ART_STYLE_PRESETS` dans `render/images.py`, sélectionnables par reel (`bash reel.sh <url> styleN`, aucun redémarrage requis). Liste et descriptions : [`bon-stock/STYLES.md`](bon-stock/STYLES.md).
 - ~~Correctifs de montage intro/outro~~ — fait (2026-07-04/05) : fondu dédié intro→premier plan, segment aléatoire dans les clips intro/outro (pas toujours 00:00), plus aucun plan coupé à moitié en fin de reel, sync audio/vidéo/outro corrigée. Voir commit `76566d3`.
