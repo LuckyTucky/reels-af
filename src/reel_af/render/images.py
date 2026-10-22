@@ -11,6 +11,7 @@ like a perfume ad.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -172,6 +173,65 @@ _ART_STYLE_PRESETS: dict[str, str] = {
     ),
 }
 
+# Métadonnée FR pour l'interface texte-vers-reel.html (nom, "bon pour",
+# palette de couleurs, description) — SOURCE UNIQUE pour le sélecteur de
+# style : l'interface va la chercher via /api/reel-af/presets au lieu de la
+# coder en dur. Pour ajouter un style11, ajouter une entrée ICI (+ le
+# preset anglais correspondant dans _ART_STYLE_PRESETS ci-dessus) — aucune
+# autre modif requise, l'interface le reflète automatiquement.
+STYLE_UI_META: dict[str, dict[str, object]] = {
+    "style1": {
+        "nom": "Pop-art / trames", "bon": "Punché, ludique, grand public",
+        "pal": ["#E24B4A", "#EF9F27", "#378ADD", "#2C2C2A"],
+        "desc": "Comic pop-art : contours d'encre épais, aplats vifs, trames de points Ben-Day, palette primaire.",
+    },
+    "style2": {
+        "nom": "Affiche mi-siècle", "bon": "Épuré, rétro, cool institutionnel",
+        "pal": ["#D85A30", "#EF9F27", "#FAECE7", "#2C2C2A"],
+        "desc": "Papier découpé mi-siècle : silhouettes plates à bords durs, orange brûlé/moutarde/crème, grand espace négatif.",
+    },
+    "style3": {
+        "nom": "Espace négatif", "bon": "Concept, idée à double sens",
+        "pal": ["#1D9E75", "#FAECE7", "#D85A30"],
+        "desc": "Vectoriel minimaliste : 2-3 aplats, espace négatif qui cache une seconde image. Malin, graphique.",
+    },
+    "style4": {
+        "nom": "Film noir couleur", "bon": "Tension, enquête, mystère",
+        "pal": ["#A32D2D", "#993C1D", "#2C2C2A", "#FAECE7"],
+        "desc": "Affiche pulp peinte : éclairage dur mi-lumière/mi-ombre, rouge sang/orange/noir, imperméables et ombres longues.",
+    },
+    "style5": {
+        "nom": "Film noir N&B", "bon": "Dramatique, sombre, sérieux",
+        "pal": ["#2C2C2A", "#5F5E5A", "#F1EFE8"],
+        "desc": "Clair-obscur noir et blanc : noirs profonds, ombres de stores, brume, grain argentique.",
+    },
+    "style6": {
+        "nom": "Onirique bleu", "bon": "Poétique, bien-être, introspection",
+        "pal": ["#85B7EB", "#EF9F27", "#ED93B1"],
+        "desc": "Gouache douce et surréaliste : figure solitaire, ciels dégradés, dominante bleue, calme et émerveillement.",
+    },
+    "style7": {
+        "nom": "Americana peinte", "bon": "Chaleureux, humain, nostalgique",
+        "pal": ["#BA7517", "#D85A30", "#97C459"],
+        "desc": "Huile réaliste narrative façon couverture mi-siècle : ambres chauds, moment humain authentique, détail peint fin.",
+    },
+    "style8": {
+        "nom": "Affiche protestataire", "bon": "Urgent, militant, coup de poing",
+        "pal": ["#D85A30", "#E24B4A", "#EF9F27", "#2C2C2A"],
+        "desc": "Affiche protestataire : contours encrés rugueux, orange feu/rouge/jaune, énergie brute et satirique.",
+    },
+    "style9": {
+        "nom": "Pochoir rouge/crème", "bon": "Iconique, politique, affirmé",
+        "pal": ["#A32D2D", "#FAECE7", "#5DCAA5", "#2C2C2A"],
+        "desc": "Sérigraphie pochoir : rouge profond/crème/sarcelle, portrait héroïque monumental, bords nets, art politique populaire.",
+    },
+    "style10": {
+        "nom": "Psychédélique 60-70", "bon": "Festif, vibrant, culture cannabis",
+        "pal": ["#D85A30", "#ED93B1", "#7F77DD", "#97C459", "#EF9F27"],
+        "desc": "Psychédélique 60-70 : silhouette noire, rubans de couleur arc-en-ciel, linéature groovy, joie vibrante.",
+    },
+}
+
 # Fallback default when a reel doesn't specify art_style: still configurable
 # via .env for anyone who wants every reel on one style without passing it
 # each time, but the per-call `art_style` argument (threaded down from
@@ -179,11 +239,33 @@ _ART_STYLE_PRESETS: dict[str, str] = {
 # to switch styles between reels.
 _ART_STYLE_DEFAULT = (os.getenv("REEL_AF_ART_STYLE") or "").strip().lower()
 
+# Styles custom distillés depuis un mood board (/texte) — vivent dans
+# bon-stock/ (monté en direct ET inscriptible, pas cuits dans l'image), donc
+# persistent sans reconstruction. Préfixe "mb-" (voir app.py _moodboard_*).
+_CUSTOM_STYLES_DIR = Path(__file__).resolve().parents[3] / "bon-stock" / "styles-custom"
+
+
+def _custom_preset(style_id: str) -> dict | None:
+    """Lecture tolérante d'un style custom — bon-stock/styles-custom/<id>/preset.json.
+
+    None si absent ou illisible (JSON corrompu, style inexistant) : _style_note
+    retombe alors sur le style par défaut plutôt que de planter le rendu.
+    """
+    path = _CUSTOM_STYLES_DIR / style_id / "preset.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
 
 def _style_note(content_mode: str, art_style: str = "") -> str:
     style = (art_style or _ART_STYLE_DEFAULT or "").strip().lower()
     if style and style in _ART_STYLE_PRESETS:
         return _ART_STYLE_PRESETS[style]
+    if style:
+        custom = _custom_preset(style)
+        if custom and custom.get("english_prompt"):
+            return custom["english_prompt"]
     return (
         _SCIENTIFIC_STYLE_NOTE
         if content_mode == "scientific"

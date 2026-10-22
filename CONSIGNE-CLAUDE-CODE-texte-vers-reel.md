@@ -18,7 +18,7 @@ Ajouter un reasoner exposé sous `reel-af.reel_text_to_reel`, sur le modèle de 
 - `text` — le texte collé par Luc (obligatoire).
 - `art_style` — `"styleN"` ou `""` (comportement par défaut). Même sémantique que le 2e argument de `reel.sh`.
 - `mode` — `"brute"` (défaut) ou `"verbatim"`.
-- `lang` — `"fr"` (défaut Bon Stock) ou `"en"`. **⚠️ EN DISCUSSION (2026-07-05), pas encore réglé** : `REEL_AF_LANG` est actuellement une CONSTANTE DE MODULE lue une seule fois au démarrage du conteneur (`hook.py`/`compose.py`/`tts.py`/`accent.py`) — pas un paramètre par requête. Pour que `lang` soit vraiment réglable par appel (comme ce JSON le suggère), il faut le même refactor que `art_style` a déjà eu (transmis en paramètre à travers tout le pipeline plutôt que lu depuis l'env une fois pour toutes). Pas juste "réutiliser le drapeau" — un vrai morceau de travail, à chiffrer avant d'implémenter ce point.
+- `lang` — `"fr"` (défaut Bon Stock) ou `"en"`. ✅ **Réglé (2026-07-05)** : `lang` est maintenant un paramètre PAR REEL transmis à travers tout le pipeline (`hook.py`/`compose.py`/`accent.py`/`tts.py`/`app.py`), avec repli sur `REEL_AF_LANG` (`.env`) si absent — même mécanique qu'`art_style`. Testé : un reel `lang="en"` explicite pendant que `.env` a `REEL_AF_LANG=fr`, sans redémarrer Docker.
 
 **Comportement selon `mode` :**
 

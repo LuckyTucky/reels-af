@@ -41,6 +41,7 @@ Invoke async, get an execution_id immediately:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -247,7 +248,7 @@ async def pick_best_narration(
 @reel.reasoner()
 async def synthesize_audio(
     narration: str, voice_tone: str, out_dir: str, target_wpm: int = 180,
-    lang: str = "",
+    lang: str = "", voice_preset: str = "",
 ) -> dict:
     """Sentence-by-sentence TTS + sample-accurate word timings.
 
@@ -260,15 +261,16 @@ async def synthesize_audio(
     are distributed by syllable count.
 
     `lang` ("fr"/"en") pick une voix Gemini adaptée — vide = repli sur
-    REEL_AF_LANG.
+    REEL_AF_LANG. `voice_preset` ("voice1".."voice10", text_to_reel
+    seulement) prime sur le choix par ton — voir render/tts.VOICE_PRESETS.
     """
     from reel_af.render.tts import (
+        resolve_voice_preset,
         strip_tts_tags,
         synthesize_audio as _synth,
-        voice_for_tone,
     )
 
-    voice = voice_for_tone(voice_tone, lang=lang)
+    voice = resolve_voice_preset(voice_preset, voice_tone, lang=lang)
     audio_path, word_timings = await _synth(
         narration=narration, voice=voice, out_dir=Path(out_dir),
         target_wpm=target_wpm,
@@ -558,6 +560,190 @@ async def _article_to_reel_locked(
     }
 
 
+def _script_from_verbatim_text(text: str) -> dict:
+    """text_to_reel mode='verbatim' : découpe pure (aucune réécriture) du
+    texte collé en un dict compatible ScriptDraft — hook = 1re phrase,
+    payoff_line = dernière phrase, mechanism_lines = phrases du milieu
+    regroupées en 2-4 blocs. `narration` reste le texte tel quel (espaces
+    normalisés), donc le TTS lit exactement les mots de Luc.
+    `skip_loop_check=True` car un texte collé n'a aucune raison de boucler
+    naturellement sur son ouverture (contrainte réservée au mode brute)."""
+    narration = " ".join(text.strip().split())
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", narration) if s.strip()]
+    if not sentences:
+        sentences = [narration or "."]
+
+    hook = sentences[0]
+    payoff_line = sentences[-1] if len(sentences) > 1 else sentences[0]
+    middle = sentences[1:-1] if len(sentences) > 2 else []
+
+    if len(middle) > 4:
+        buckets: list[list[str]] = [[] for _ in range(4)]
+        for i, s in enumerate(middle):
+            buckets[i * 4 // len(middle)].append(s)
+        middle = [" ".join(b) for b in buckets if b]
+    while len(middle) < 2:
+        # ScriptDraft impose min_length=2 sur mechanism_lines — un texte
+        # trop court (1-2 phrases) réutilise hook/payoff plutôt que
+        # d'inventer du texte.
+        filler = payoff_line if hook not in middle else hook
+        middle.append(filler)
+
+    return {
+        "hook": hook,
+        "hook_variant": "curiosity_gap",
+        "mechanism_lines": middle[:4],
+        "payoff_line": payoff_line,
+        "target_wpm": 165,
+        "narration": narration,
+        "skip_loop_check": True,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
+# ENTRY REASONER 3 — Texte collé → Reel
+# ════════════════════════════════════════════════════════════════════
+
+
+@reel.reasoner()
+async def text_to_reel(
+    text: str,
+    out_dir: str | None = None,
+    art_style: str = "",
+    mode: str = "brute",
+    lang: str = "",
+    voice_preset: str = "",
+) -> dict:
+    """Turn pasted text into a vertical viral reel (no URL).
+
+    ``mode == "brute"`` (défaut) : le texte remplace l'« essence » — on
+    saute l'extraction (pas d'URL/fetch), puis hook.py + compose.py
+    tournent normalement dessus (même pipeline que article_to_reel, privé
+    de l'étape extract).
+
+    ``mode == "verbatim"`` : on saute hook.py ET compose.py. Le texte
+    devient directement la narration, telle quelle (aucune réécriture) —
+    seulement découpé en phrases pour les timings/beats.
+
+    ``voice_preset`` : "voice1".."voice10" (voir render/tts.VOICE_PRESETS) ;
+    vide = repli sur le choix par ton habituel. voice1 = voix actuellement
+    en prod.
+
+    Un seul reel se rend à la fois (verrou global _REEL_RENDER_LOCK).
+
+    Example:
+      curl -X POST http://localhost:8080/api/v1/execute/async/reel-af.reel_text_to_reel \\
+        -H 'Content-Type: application/json' \\
+        -d '{"input":{"text":"...","art_style":"style3","mode":"brute","lang":"fr","voice_preset":"voice3"}}'
+    """
+    if "OPENROUTER_API_KEY" not in os.environ:
+        return {"error": "OPENROUTER_API_KEY not set in env."}
+    if not text or not text.strip():
+        return {"error": "text is required and cannot be empty."}
+    async with _REEL_RENDER_LOCK:
+        return await _text_to_reel_locked(
+            text, out_dir, art_style, mode, lang, voice_preset,
+        )
+
+
+async def _text_to_reel_locked(
+    text: str,
+    out_dir: str | None = None,
+    art_style: str = "",
+    mode: str = "brute",
+    lang: str = "",
+    voice_preset: str = "",
+) -> dict:
+    run_id = uuid.uuid4().hex[:8]
+    out_path = (
+        Path(out_dir) if out_dir else (Path.cwd() / "output" / f"text-{run_id}")
+    )
+    out_path.mkdir(parents=True, exist_ok=True)
+    media_dir = out_path / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+
+    app.cost_tracker.reset()
+    cost_track.reset()
+
+    timings: dict[str, float] = {}
+    node = app.node_id
+    app.note(
+        f"reel-af text: starting run {run_id} (mode={mode})",
+        tags=["reel", "text", "start"],
+    )
+    t_pipeline = time.time()
+
+    if mode == "verbatim":
+        # Aucune réécriture : découpe pure du texte collé, pas d'appel .ai().
+        t = time.time()
+        script = _script_from_verbatim_text(text)
+        timings["compose"] = round(time.time() - t, 1)
+        essence = {
+            "core_claim": script["hook"][:200],
+            "mechanism": script["payoff_line"][:200],
+            "evidence": [script["hook"][:120]],
+            "content_mode": "general",
+            "domain": "verbatim",
+        }
+        chosen_hook = {"hookability": None}
+    else:
+        # mode == "brute" : le texte remplace l'essence ; hook + compose
+        # tournent normalement (pipeline article privé de l'extraction).
+        from reel_af.agents.extract import essence_from_text
+
+        t = time.time()
+        essence_obj = await essence_from_text(app, text)
+        essence = essence_obj.model_dump()
+        timings["extract"] = round(time.time() - t, 1)
+
+        t = time.time()
+        h_out = await app.call(f"{node}.reel_pick_hook", essence=essence, lang=lang)
+        timings["hook"] = round(time.time() - t, 1)
+        chosen_hook = h_out["hook_pick"]["chosen"]
+
+        t = time.time()
+        c_out = await app.call(
+            f"{node}.reel_compose_script",
+            essence=essence,
+            chosen_hook=chosen_hook,
+            lang=lang,
+        )
+        timings["compose"] = round(time.time() - t, 1)
+        script = c_out["script"]
+
+    final = await _render_downstream(
+        node=node,
+        essence=essence,
+        script=script,
+        out_path=out_path,
+        media_dir=media_dir,
+        run_id=run_id,
+        timings=timings,
+        art_style=art_style,
+        lang=lang,
+        voice_preset=voice_preset,
+    )
+
+    cost_report = cost_track.write(out_path, app.execution_cost)
+
+    timings["total"] = round(time.time() - t_pipeline, 1)
+    app.note(
+        f"reel-af text: run {run_id} done → {final['video_path']}",
+        tags=["reel", "text", "done"],
+    )
+    return {
+        **final,
+        "source": "text",
+        "mode": mode,
+        "hook": script["hook"],
+        "hook_variant": script["hook_variant"],
+        "hookability_score": chosen_hook.get("hookability"),
+        "run_id": run_id,
+        "timings_s": timings,
+        "cost_usd": cost_report["total_cost_usd"],
+    }
+
+
 # ════════════════════════════════════════════════════════════════════
 # ENTRY REASONER 2 — Topic → Reel
 # ════════════════════════════════════════════════════════════════════
@@ -747,6 +933,7 @@ async def _render_downstream(
     timings: dict[str, float],
     art_style: str = "",
     lang: str = "",
+    voice_preset: str = "",
 ) -> dict:
     """audio → cards/beats (parallel) → visuals/accents (parallel) →
     videos → stitch. Used by both entry points."""
@@ -760,6 +947,7 @@ async def _render_downstream(
         out_dir=str(media_dir),
         target_wpm=script["target_wpm"],
         lang=lang,
+        voice_preset=voice_preset,
     )
     timings["tts"] = round(time.time() - t, 1)
 
@@ -848,6 +1036,226 @@ def _health() -> dict:
 from typing import cast as _cast  # noqa: E402
 
 _cast(Any, app).add_api_route("/health", _health, methods=["GET"])
+
+
+# ════════════════════════════════════════════════════════════════════
+# Interface texte-vers-reel — servie par CET agent (port 8092), pas par
+# le control-plane (image verrouillée, refuse tout Origin ≠
+# http://localhost:8090 — voir CONSIGNE-CLAUDE-CODE-texte-vers-reel.md
+# §2). Fichiers statiques + un petit proxy serveur-à-serveur vers le
+# control-plane (jamais soumis au CORS du navigateur, contrairement à un
+# fetch() direct depuis la page).
+# ════════════════════════════════════════════════════════════════════
+
+from starlette.requests import Request  # noqa: E402
+from starlette.responses import FileResponse, JSONResponse  # noqa: E402
+from starlette.staticfiles import StaticFiles  # noqa: E402
+
+_STYLES_DIR = _PROJECT_ROOT / "styles"
+if _STYLES_DIR.is_dir():
+    _cast(Any, app).mount(
+        "/styles", StaticFiles(directory=str(_STYLES_DIR)), name="styles",
+    )
+
+# Styles custom distillés depuis un mood board — bon-stock/ est monté EN
+# DIRECT et INSCRIPTIBLE (voir docker-compose.yml, retiré le ":ro") pour que
+# ce store survive sans reconstruction. Même dossier que
+# render/images._CUSTOM_STYLES_DIR.
+_CUSTOM_STYLES_DIR = _PROJECT_ROOT / "bon-stock" / "styles-custom"
+_CUSTOM_STYLES_DIR.mkdir(parents=True, exist_ok=True)
+_cast(Any, app).mount(
+    "/styles-custom",
+    StaticFiles(directory=str(_CUSTOM_STYLES_DIR)),
+    name="styles-custom",
+)
+
+
+def _texte_page() -> FileResponse:
+    return FileResponse(str(_PROJECT_ROOT / "texte-vers-reel.html"))
+
+
+_cast(Any, app).add_api_route("/texte", _texte_page, methods=["GET"])
+
+
+async def _proxy_execute(reasoner: str, request: Request) -> JSONResponse:
+    """Relais serveur-à-serveur : reçoit le POST same-origin du navigateur
+    et le relaie vers l'API async du control-plane. Un appel serveur n'est
+    jamais soumis au CORS (règle du navigateur, pas du serveur), donc ceci
+    contourne le blocage 403 du control-plane sans toucher à son image
+    verrouillée."""
+    import aiohttp
+
+    body = await request.json()
+    target = (
+        f"{os.getenv('AGENTFIELD_SERVER', 'http://localhost:8080')}"
+        f"/api/v1/execute/async/reel-af.{reasoner}"
+    )
+    async with aiohttp.ClientSession() as session:
+        async with session.post(target, json=body) as resp:
+            data = await resp.json(content_type=None)
+            return JSONResponse(data, status_code=resp.status)
+
+
+_cast(Any, app).add_api_route(
+    "/api/reel-af/execute/{reasoner}", _proxy_execute, methods=["POST"],
+)
+
+
+def _presets() -> dict:
+    """Styles + voix pour l'interface texte-vers-reel.html — SOURCE UNIQUE
+    côté Python (render/images.STYLE_UI_META, render/tts.VOICE_PRESETS) +
+    les styles custom distillés depuis un mood board (bon-stock/styles-
+    custom/*/preset.json). Ajouter un style ou une voix là-bas suffit ;
+    l'interface le reflète sans jamais être retouchée."""
+    from reel_af.render.images import STYLE_UI_META
+    from reel_af.render.tts import VOICE_PRESETS
+
+    styles = [
+        {"id": key, **meta} for key, meta in STYLE_UI_META.items()
+    ]
+    for preset_file in sorted(_CUSTOM_STYLES_DIR.glob("*/preset.json")):
+        try:
+            data = json.loads(preset_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        style_id = data.get("id") or preset_file.parent.name
+        styles.append({
+            "id": style_id,
+            "nom": data.get("nom", style_id),
+            "bon": data.get("bon", ""),
+            "pal": data.get("pal", []),
+            "desc": data.get("desc", ""),
+            "thumb": f"/styles-custom/{style_id}/thumb.jpg",
+        })
+    voices = [
+        {"id": key, **meta} for key, meta in VOICE_PRESETS.items()
+    ]
+    return {"styles": styles, "voices": voices}
+
+
+_cast(Any, app).add_api_route("/api/reel-af/presets", _presets, methods=["GET"])
+
+
+def _extract_palette(images: list, n: int = 5) -> list[str]:
+    """Couleurs dominantes (hex) d'une mosaïque réduite des refs — PIL
+    quantize, déterministe (pas fiable de laisser le LLM inventer des hex)."""
+    from PIL import Image as _PILImage
+
+    mosaic = _PILImage.new("RGB", (64 * len(images), 64))
+    for i, img in enumerate(images):
+        mosaic.paste(img.resize((64, 64)), (i * 64, 0))
+    quantized = mosaic.quantize(colors=n)
+    palette = quantized.getpalette() or []
+    colors = [tuple(palette[i : i + 3]) for i in range(0, min(len(palette), n * 3), 3)]
+    return [f"#{r:02X}{g:02X}{b:02X}" for r, g, b in colors]
+
+
+def _make_moodboard_thumb(images: list, dest: Path, width: int = 440) -> None:
+    """Vignette = collage horizontal des refs, recadré ~440px de large,
+    cohérent avec les vignettes des styles built-in (même logique de
+    center-crop-to-cover que render/images._crop_to_9x16)."""
+    from PIL import Image as _PILImage
+
+    n = len(images)
+    cell_w = max(1, width // n)
+    height = cell_w * 16 // 9
+    collage = _PILImage.new("RGB", (cell_w * n, height))
+    for i, img in enumerate(images):
+        w, h = img.size
+        scale = max(cell_w / w, height / h)
+        resized = img.resize((max(1, round(w * scale)), max(1, round(h * scale))))
+        left = (resized.width - cell_w) // 2
+        top = (resized.height - height) // 2
+        cropped = resized.crop((left, top, left + cell_w, top + height))
+        collage.paste(cropped, (i * cell_w, 0))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    collage.save(str(dest), format="JPEG", quality=88)
+
+
+async def _moodboard_upload(request: Request) -> JSONResponse:
+    """POST /api/reel-af/moodboard (multipart) — `nom` (optionnel) + 1..8
+    `images` → distillation vision en UN preset de style réutilisable,
+    écrit dans bon-stock/styles-custom/<id>/ (persiste sans reconstruction).
+
+    N'entre PAS dans _REEL_RENDER_LOCK : la distillation est un appel court
+    et indépendant d'un rendu de reel — elle n'a pas à attendre son tour
+    derrière un reel en cours."""
+    import io
+
+    from PIL import Image as _PILImage, ImageOps as _ImageOps
+
+    form = await request.form()
+    nom_hint = str(form.get("nom") or "").strip()
+    uploads = [v for v in form.getlist("images") if hasattr(v, "filename") and v.filename]
+    if not uploads:
+        return JSONResponse({"error": "Aucune image reçue."}, status_code=422)
+    if len(uploads) > 8:
+        return JSONResponse({"error": "8 images maximum."}, status_code=422)
+
+    max_bytes = 10 * 1024 * 1024
+    raw_images: list[bytes] = []
+    for up in uploads:
+        data = await up.read()
+        if len(data) > max_bytes:
+            return JSONResponse(
+                {"error": f"Image trop lourde ({up.filename}) — 10 Mo max."},
+                status_code=422,
+            )
+        raw_images.append(data)
+
+    pil_images = []
+    for data in raw_images:
+        try:
+            img = _PILImage.open(io.BytesIO(data))
+            img.verify()
+            img = _PILImage.open(io.BytesIO(data))  # verify() invalide l'objet
+            pil_images.append(_ImageOps.exif_transpose(img).convert("RGB"))
+        except Exception:  # noqa: BLE001
+            return JSONResponse(
+                {"error": "Fichier non reconnu comme image."}, status_code=422,
+            )
+
+    slug = re.sub(r"[^a-z0-9]+", "-", nom_hint.lower()).strip("-")[:24]
+    style_id = f"mb-{slug or uuid.uuid4().hex[:6]}-{uuid.uuid4().hex[:4]}"
+    style_dir = _CUSTOM_STYLES_DIR / style_id
+    refs_dir = style_dir / "refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+
+    ref_paths = []
+    for i, img in enumerate(pil_images):
+        p = refs_dir / f"ref-{i:02d}.jpg"
+        img.save(str(p), format="JPEG", quality=90)
+        ref_paths.append(p)
+
+    try:
+        from reel_af.agents.moodboard import distill_style
+
+        distillation = await distill_style(app, ref_paths)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {"error": f"Distillation échouée : {exc}"}, status_code=500,
+        )
+
+    pal = _extract_palette(pil_images)
+    _make_moodboard_thumb(pil_images, style_dir / "thumb.jpg")
+
+    preset = {
+        "id": style_id,
+        "english_prompt": distillation.english_prompt,
+        "nom": nom_hint or distillation.nom,
+        "bon": distillation.bon,
+        "pal": pal,
+        "desc": distillation.desc,
+    }
+    (style_dir / "preset.json").write_text(
+        json.dumps(preset, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+    return JSONResponse({**preset, "thumb": f"/styles-custom/{style_id}/thumb.jpg"})
+
+
+_cast(Any, app).add_api_route(
+    "/api/reel-af/moodboard", _moodboard_upload, methods=["POST"],
+)
 
 
 def main() -> None:

@@ -185,3 +185,17 @@ async def extract_essence(app: Any, url: str) -> Essence:
     )
 
     return await app.ai(system=_SYSTEM, user=user, schema=Essence)
+
+
+async def essence_from_text(app: Any, text: str) -> Essence:
+    """text_to_reel mode='brute' : même distillation que extract_essence,
+    mais SANS fetch/readability — le texte collé remplace directement le
+    corps d'article dans le prompt."""
+    body = text.strip()[:PROMPT_BODY_CHARS]
+    user = (
+        f"ARTICLE\n"
+        f"  url   : (texte collé, aucune URL)\n"
+        f"  title : (aucun — texte brut)\n\n"
+        f"FULL BODY (as pasted, truncated to fit context):\n{body}"
+    )
+    return await app.ai(system=_SYSTEM, user=user, schema=Essence)

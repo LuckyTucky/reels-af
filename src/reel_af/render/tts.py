@@ -48,6 +48,31 @@ TTS_SAMPLE_RATE = 24000
 # 18-25s reel. 1.5+ starts sounding rushed; below 1.3 still drags.
 _AUDIO_SPEED_FACTOR = 1.35
 
+# Chaque phrase est synthétisée par un appel indépendant (aucun contexte
+# partagé entre elles), donc le débit NATUREL de Gemini varie énormément
+# d'une phrase à l'autre (mesuré : 1.70-2.81 mots/s sur un même reel, sans
+# lien avec la longueur du texte). L'atempo adaptatif par phrase (plus bas)
+# corrige le débit final mais pas la variance de compression appliquée
+# (1.15x à 1.59x mesuré) — l'oreille perçoit cette compression inégale
+# comme des changements de rythme, même quand le débit mots/minute
+# converge. Le paramètre structuré `speaking_rate` de Gemini est réputé
+# peu fiable (rapports googleapis/python-genai#1707) ; les instructions en
+# langage naturel sont la méthode recommandée par Google pour orienter le
+# débit — on vise donc un débit stable À LA SOURCE, l'atempo restant un
+# filet de sécurité plutôt que le seul mécanisme de correction.
+_PACING_INSTRUCTIONS = (
+    "Speak at a calm, steady, measured pace — consistent speed from the "
+    "first word to the last, no rushing, no dragging, no dramatic "
+    "slow-downs or speed-ups between sentences."
+)
+
+# Tolérance ±20% autour du débit cible (target_wpm) jugée "naturelle" —
+# aucune correction appliquée à l'intérieur de cette bande (voir
+# _synth_one dans synthesize_audio). Resserrer réduit la variance de
+# rythme perçue mais aplatit plus l'émotion naturelle ; élargir laisse
+# plus de naturel mais tolère plus d'écart de débit entre phrases.
+_PACE_TOLERANCE = 0.20
+
 # Gemini voice map by tone. Picks below are the most reliable for
 # English narration in each register.
 _VOICE_BY_TONE: dict[str, str] = {
@@ -65,6 +90,36 @@ _VOICE_BY_TONE: dict[str, str] = {
 # 2026-07-05. Repli par défaut si `lang` n'est pas passé par appel.
 LANG_DEFAULT = (os.getenv("REEL_AF_LANG") or "en").strip().lower()
 _FR_VOICE = "Puck"
+
+# Sélecteur de voix pour text_to_reel (2026-07-05) — 10 voix nommées
+# voice1..voice10, éditable ici en tout temps (nom Gemini, étiquette FR,
+# genre pour l'UI). voice1 = la voix actuellement en prod (Puck). Les 9
+# autres : 4 hommes / 5 femmes, piochées dans le catalogue Gemini en
+# évitant Leda/Despina/Sulafat (déjà écartées, trop « bébé » en FR — voir
+# note ci-dessus). Rien d'autre dans le pipeline ne dépend de ces clés :
+# ajouter/retirer/renommer une entrée ici suffit, aucune autre modif.
+VOICE_PRESETS: dict[str, dict[str, str]] = {
+    "voice1": {"gemini": "Puck", "label": "Voix actuelle", "gender": "H"},
+    "voice2": {"gemini": "Charon", "label": "Grave, sérieux", "gender": "H"},
+    "voice3": {"gemini": "Kore", "label": "Chaleureuse, curieuse", "gender": "F"},
+    "voice4": {"gemini": "Fenrir", "label": "Énergique", "gender": "H"},
+    "voice5": {"gemini": "Aoede", "label": "Amicale, chaleureuse", "gender": "F"},
+    "voice6": {"gemini": "Orus", "label": "Ferme, posé", "gender": "H"},
+    "voice7": {"gemini": "Callirrhoe", "label": "Décontractée, naturelle", "gender": "F"},
+    "voice8": {"gemini": "Autonoe", "label": "Vive, lumineuse", "gender": "F"},
+    "voice9": {"gemini": "Schedar", "label": "Neutre, mesuré", "gender": "H"},
+    "voice10": {"gemini": "Erinome", "label": "Claire, posée", "gender": "F"},
+}
+
+
+def resolve_voice_preset(voice_preset: str, tone: str, lang: str = "") -> str:
+    """text_to_reel : si `voice_preset` (ex. "voice3") est fourni, il prime
+    sur tout — sinon repli sur le choix par ton/langue habituel
+    (`voice_for_tone`)."""
+    key = (voice_preset or "").strip().lower()
+    if key in VOICE_PRESETS:
+        return VOICE_PRESETS[key]["gemini"]
+    return voice_for_tone(tone, lang=lang)
 
 _TAG_RE = re.compile(r"\[[^\]]*\]")
 _SENTENCE_END = re.compile(r"[.!?]+(?:[\"'’”])?\s*$")
@@ -121,6 +176,7 @@ async def _sdk_generate_wav(
         model=model,
         voice=voice,
         response_format="pcm",
+        instructions=_PACING_INSTRUCTIONS,
         timeout=timeout,
     )
     if not pcm:
@@ -314,17 +370,37 @@ async def synthesize_audio(
         tmp_path.rename(raw_path)
         final_path = sent_dir / f"sentence-{idx:02d}.wav"
 
-        # Débit ADAPTATIF par phrase plutôt qu'un facteur fixe : chaque
-        # phrase est synthétisée indépendamment par Gemini (pas de contexte
-        # partagé entre elles), donc son débit naturel varie — un facteur
-        # d'accélération unique préserve ces écarts au lieu de les
-        # uniformiser, d'où un rythme perçu comme inégal sur tout le reel.
-        # On vise le même débit (mots/seconde) pour chaque phrase, borné à
-        # une plage qui reste naturelle à l'oreille.
+        # Variation naturelle MODÉRÉE plutôt qu'un débit plat forcé partout
+        # (2026-07-05) : testé sur deux moteurs TTS différents (Gemini,
+        # Kokoro), la même phrase de clôture courte ressort systématiquement
+        # plus lente — ce n'est pas un bug d'un moteur en particulier, c'est
+        # le modèle qui appuie naturellement l'emphase sur ces phrases.
+        # Forcer TOUTES les phrases au même débit (mots/seconde) écrasait
+        # cette emphase et exigeait des facteurs d'accélération très
+        # inégaux (1.15x à 1.6x) pour y arriver, ce qui sonnait
+        # artificiellement compressé sur les phrases les plus corrigées.
+        # Nouvelle règle : une bande de tolérance autour du débit cible est
+        # considérée naturelle et n'est PAS touchée (facteur 1.0, la prise
+        # d'origine est gardée) ; seules les phrases qui sortent VRAIMENT
+        # de cette bande sont ramenées jusqu'au bord de la bande la plus
+        # proche (pas jusqu'au centre) — correction minimale, pas un
+        # aplatissement.
         word_count = len(strip_tts_tags(sent_with_tags).split())
-        target_dur = word_count / target_wps if target_wps > 0 and word_count else raw_dur
-        factor = raw_dur / target_dur if target_dur > 0 else _AUDIO_SPEED_FACTOR
-        factor = max(1.15, min(factor, 1.6))
+        target_wps_band = (target_wps * (1 - _PACE_TOLERANCE), target_wps * (1 + _PACE_TOLERANCE))
+        raw_wps = word_count / raw_dur if raw_dur > 0 and word_count else target_wps
+
+        if target_wps_band[0] <= raw_wps <= target_wps_band[1] or not word_count:
+            factor = 1.0  # dans la bande naturelle : on ne touche à rien
+        elif raw_wps < target_wps_band[0]:
+            # trop lent : accélère seulement jusqu'au bord lent de la bande
+            edge_dur = word_count / target_wps_band[0]
+            factor = raw_dur / edge_dur if edge_dur > 0 else 1.0
+        else:
+            # trop rapide : ralentit seulement jusqu'au bord rapide de la bande
+            edge_dur = word_count / target_wps_band[1]
+            factor = raw_dur / edge_dur if edge_dur > 0 else 1.0
+
+        factor = max(0.85, min(factor, 1.6))
 
         await _atempo_speed_up(raw_path, final_path, factor)
         dur = _probe_duration(final_path)
@@ -368,6 +444,8 @@ async def synthesize_audio(
 
 __all__ = [
     "DEFAULT_TTS_MODEL",
+    "VOICE_PRESETS",
+    "resolve_voice_preset",
     "strip_tts_tags",
     "synthesize_audio",
     "synthesize_audio_single",

@@ -24,3 +24,5 @@ services:
     volumes:
       - ./src:/app/src:ro
       - ./.env:/app/.env:ro
+      - ./texte-vers-reel.html:/app/texte-vers-reel.html:ro
+      - ./styles:/app/styles:ro

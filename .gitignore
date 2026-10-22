@@ -39,3 +39,8 @@ Thumbs.db
 bon-stock/intro/
 bon-stock/outro/
 bon-stock/broll/
+
+# Styles custom distillés depuis un mood board (/texte) — uploads utilisateur
+# + refs, générés au runtime dans un dossier monté en direct, jamais cuits
+# dans l'image.
+bon-stock/styles-custom/

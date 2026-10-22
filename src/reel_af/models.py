@@ -134,6 +134,15 @@ class ScriptDraft(BaseModel):
             "kill retention, so we keep this high."
         ),
     )
+    skip_loop_check: bool = Field(
+        default=False,
+        description=(
+            "True for verbatim pasted text (text_to_reel mode='verbatim'): "
+            "the narration is the user's own words, unrewritten, so the "
+            "loop-back callback can't be enforced. Must be declared before "
+            "`narration` so its validator can see it via info.data."
+        ),
+    )
     narration: str = Field(
         ...,
         description=(
@@ -153,6 +162,8 @@ class ScriptDraft(BaseModel):
         final 12 words. Catches the obvious miss-cases where the model
         writes a hook then closes on an unrelated thought.
         """
+        if info.data.get("skip_loop_check"):
+            return v
         hook = info.data.get("hook") or ""
         if not hook or not v:
             return v
@@ -565,6 +576,33 @@ class ConversationalScript(BaseModel):
     )
 
 
+# ════════════════════════════════════════════════════════════════════
+# Mood board → style custom (distillation vision, bon-stock/styles-custom/)
+# ════════════════════════════════════════════════════════════════════
+
+
+class MoodboardDistillation(BaseModel):
+    """Sortie du directeur artistique vision pour un mood board téléversé
+    dans /texte — distille N images en UN preset de style réutilisable,
+    au même format que les presets codés en dur (render/images.py)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    english_prompt: str = Field(
+        ...,
+        min_length=20,
+        description=(
+            "60-90 mots, EN ANGLAIS, décrivant les traits visuels communs "
+            "aux images (technique, contours, texture, palette, éclairage, "
+            "ambiance) + exclusions pertinentes. Jamais de nom d'artiste. "
+            "Doit se terminer par la clause de composition verticale."
+        ),
+    )
+    nom: str = Field(..., min_length=1, max_length=60, description="Nom court FR, 2-4 mots.")
+    bon: str = Field(..., min_length=1, max_length=120, description='"Bon pour…" — 3-5 mots.')
+    desc: str = Field(..., min_length=1, max_length=240, description="1 phrase FR.")
+
+
 class PairwiseVerdict(BaseModel):
     """Judge's pick among N candidate narrations."""
 
@@ -594,6 +632,7 @@ __all__ = [
     "HookVariant",
     "HuntBatch",
     "HunterAngle",
+    "MoodboardDistillation",
     "MotionHint",
     "OpenStyle",
     "PairwiseVerdict",

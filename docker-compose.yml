@@ -52,11 +52,15 @@ services:
     volumes:
       # Rendered reels and intermediates survive container rebuilds.
       - ./output:/app/output
-      # Marque Bon Stock EN DIRECT (logo, indicatif, signature, intro/, outro/).
-      # Monté → changer/ajouter un clip ne nécessite PAS de reconstruction,
-      # juste `docker compose up -d reel-af`. Les gros clips vidéo ne gonflent
-      # pas l'image (voir .dockerignore).
-      - ./bon-stock:/app/bon-stock:ro
+      # Marque Bon Stock EN DIRECT (logo, indicatif, signature, intro/, outro/,
+      # styles-custom/). Monté → changer/ajouter un clip ne nécessite PAS de
+      # reconstruction, juste `docker compose up -d reel-af`. Les gros clips
+      # vidéo ne gonflent pas l'image (voir .dockerignore).
+      # INSCRIPTIBLE (pas de ":ro") depuis la fonctionnalité mood board →
+      # style custom (2026-10-22) : POST /api/reel-af/moodboard écrit dans
+      # bon-stock/styles-custom/<id>/ pour que le nouveau style persiste sans
+      # reconstruction.
+      - ./bon-stock:/app/bon-stock
     restart: on-failure
 
 volumes:
