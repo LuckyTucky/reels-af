@@ -60,6 +60,11 @@
   .mb-upload button{background:var(--card2); color:var(--acc); border:1px solid var(--acc);
     border-radius:var(--rad); padding:9px 16px; font:inherit; font-size:13px; font-weight:600; cursor:pointer}
   .mb-upload button:disabled{opacity:.45; cursor:not-allowed}
+  .pp-upload{display:flex; gap:12px; align-items:center; flex-wrap:wrap}
+  .pp-thumb{width:56px; height:56px; border-radius:8px; background-size:cover;
+    background-position:center; border:1px solid var(--line); background-color:var(--card2)}
+  .pp-upload button.rm{background:none; color:var(--mut); border:1px solid var(--line);
+    border-radius:var(--rad); padding:6px 12px; font:inherit; font-size:12px; cursor:pointer}
   .go{margin-top:22px; width:100%; height:46px; border:none; border-radius:var(--rad);
     background:var(--acc); color:#08211a; font:inherit; font-size:15px; font-weight:700; cursor:pointer}
   .go:disabled{opacity:.45; cursor:not-allowed}
@@ -124,6 +129,16 @@
     </div>
 
     <div class="section">
+      <label class="fld">Photo de la personne (si le reel parle d'elle)</label>
+      <div class="pp-upload">
+        <div class="pp-thumb" id="pp-thumb"></div>
+        <input type="file" id="pp-file" accept="image/*">
+        <button class="rm" id="pp-remove" type="button" style="display:none">✕ retirer</button>
+      </div>
+      <p class="hint" id="pp-status">Optionnel — jointe à chaque image générée pour que le style s'applique à SA photo plutôt qu'à un visage inventé. Marche mieux avec certains styles que d'autres.</p>
+    </div>
+
+    <div class="section">
       <label class="fld">Voix</label>
       <div class="opts" id="voices"></div>
     </div>
@@ -140,6 +155,7 @@
 // un style ou une voix là-bas suffit — cette page ne code plus rien en dur.
 let lang = "fr";
 let voicePreset = "voice1";
+let personPhotoId = "";
 let voicesLoaded = false;
 const selected = new Set();
 
@@ -250,6 +266,35 @@ document.getElementById('mb-go').onclick = async () => {
   }
 };
 
+document.getElementById('pp-file').onchange = async () => {
+  const file = document.getElementById('pp-file').files[0];
+  const ppStatus = document.getElementById('pp-status');
+  const thumb = document.getElementById('pp-thumb');
+  if(!file) return;
+  ppStatus.textContent = 'Envoi…';
+  const fd = new FormData();
+  fd.append('photo', file);
+  try{
+    const r = await fetch('/api/reel-af/person-photo', { method: 'POST', body: fd });
+    const data = await r.json().catch(() => ({}));
+    if(!r.ok) throw new Error(data.error || `échec (${r.status})`);
+    personPhotoId = data.id;
+    thumb.style.backgroundImage = `url('${data.url}')`;
+    document.getElementById('pp-remove').style.display = 'inline-block';
+    ppStatus.textContent = 'Photo prête — jointe aux reels que tu lances ci-dessous.';
+  }catch(err){
+    personPhotoId = '';
+    ppStatus.innerHTML = `<span class="warn">Échec</span> — ${err.message}`;
+  }
+};
+document.getElementById('pp-remove').onclick = () => {
+  personPhotoId = '';
+  document.getElementById('pp-file').value = '';
+  document.getElementById('pp-thumb').style.backgroundImage = 'none';
+  document.getElementById('pp-remove').style.display = 'none';
+  document.getElementById('pp-status').textContent = 'Optionnel — jointe à chaque image générée pour que le style s\'applique à SA photo plutôt qu\'à un visage inventé. Marche mieux avec certains styles que d\'autres.';
+};
+
 document.getElementById('lang').onclick = e => {
   const b = e.target.closest('button'); if(!b) return;
   lang = b.dataset.l;
@@ -284,7 +329,7 @@ async function launchStyle(art_style, log){
   try{
     const r = await fetch('/api/reel-af/execute/reel_text_to_reel', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ input:{ text, art_style, mode, lang, voice_preset: voicePreset } })
+      body: JSON.stringify({ input:{ text, art_style, mode, lang, voice_preset: voicePreset, person_photo: personPhotoId } })
     });
     const data = await r.json().catch(()=>({}));
     const id = data.execution_id || data.id || '';

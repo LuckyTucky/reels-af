@@ -44,3 +44,8 @@ bon-stock/broll/
 # + refs, générés au runtime dans un dossier monté en direct, jamais cuits
 # dans l'image.
 bon-stock/styles-custom/
+
+# Photos de personnes-sujet (/texte, upload optionnel) — JAMAIS dans git
+# (données personnelles), générées au runtime dans un dossier monté en
+# direct et inscriptible.
+bon-stock/person-refs/

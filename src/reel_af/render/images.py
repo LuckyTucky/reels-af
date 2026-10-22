@@ -273,10 +273,51 @@ def _style_note(content_mode: str, art_style: str = "") -> str:
     )
 
 
-def _augment(prompt: str, content_mode: str = "general", art_style: str = "") -> str:
-    """Append the style block (mode-aware, or a named art_style override)."""
+def _augment(
+    prompt: str, content_mode: str = "general", art_style: str = "",
+    has_reference: bool = False,
+) -> str:
+    """Append the style block (mode-aware, or a named art_style override).
+
+    `has_reference=True` (une photo de la personne-sujet est jointe en
+    entrée, voir generate_first_frame) change la formulation : on demande
+    explicitement une ÉDITION de la photo attachée plutôt qu'une création
+    libre, pour que le modèle préserve le visage/l'identité au lieu de
+    n'en garder qu'une vague inspiration."""
     base = prompt.strip().rstrip(".")
-    return f"{base}. {_style_note(content_mode, art_style)}."
+    style = _style_note(content_mode, art_style)
+    if has_reference:
+        return (
+            f"Using the attached reference photo of this specific person — "
+            f"preserve their face, identity and likeness exactly, do not "
+            f"invent a different-looking person — depict them in the "
+            f"following scene: {base}. Apply this visual style to the "
+            f"entire image: {style}."
+        )
+    return f"{base}. {style}."
+
+
+# Photo de la personne-sujet du reel (/texte, upload optionnel) — même
+# logique de dossier que _CUSTOM_STYLES_DIR : bon-stock/ est monté en
+# direct ET inscriptible (voir app.py _person_photo_upload).
+_PERSON_REFS_DIR = Path(__file__).resolve().parents[3] / "bon-stock" / "person-refs"
+
+
+def _person_photo_data_url(person_photo: str) -> str | None:
+    """person_photo (id court retourné par /api/reel-af/person-photo) →
+    data: URL base64, ou None si absent/illisible (on retombe alors
+    silencieusement sur une génération texte seul plutôt que de planter
+    le beat)."""
+    if not person_photo:
+        return None
+    path = _PERSON_REFS_DIR / f"{person_photo}.jpg"
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    import base64 as _b64
+
+    return f"data:image/jpeg;base64,{_b64.b64encode(data).decode()}"
 
 
 def _crop_to_9x16(src: Path, dest: Path, target_w: int = 720) -> Path:
@@ -320,18 +361,31 @@ async def generate_first_frame(
     out_dir: Path,
     content_mode: str = "general",
     art_style: str = "",
+    person_photo: str = "",
 ) -> Path:
     """Generate one 720×1280 first frame for a beat.
 
     Calls Gemini Image, saves the raw output, then center-crops to 9:16.
     Raises on hard failure — callers catch and fall back to a placeholder
     + ken-burns when an individual frame fails.
+
+    `person_photo` (optionnel) : id d'une photo de la personne-sujet du
+    reel (bon-stock/person-refs/<id>.jpg, voir app.py). Si présent, elle
+    est jointe en entrée (édition image-to-image) au lieu d'une génération
+    texte seul — le modèle préserve le visage/l'identité et l'applique à
+    la scène + au style demandés. Fonctionne mieux avec certains styles
+    que d'autres (image-to-image, pas garanti) ; retombe sur texte seul si
+    la photo est introuvable/illisible.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_path = out_dir / f"frame-{idx:02d}-raw.png"
     final_path = out_dir / f"frame-{idx:02d}.jpg"
 
-    augmented = _augment(image_prompt, content_mode, art_style)
+    ref_data_url = _person_photo_data_url(person_photo)
+    augmented = _augment(
+        image_prompt, content_mode, art_style, has_reference=bool(ref_data_url),
+    )
+    image_kwargs = {"image_urls": [ref_data_url]} if ref_data_url else {}
 
     # Réessais : la génération d'image (Gemini) rate parfois de façon
     # transitoire (vide, timeout, hoquet réseau). Un seul essai laissait alors
@@ -342,7 +396,7 @@ async def generate_first_frame(
     for essai in range(max(1, tentatives)):
         try:
             result = await provider.generate_image(
-                prompt=augmented, model=IMAGE_MODEL, n=1,
+                prompt=augmented, model=IMAGE_MODEL, n=1, **image_kwargs,
             )
             # Le SDK renvoie un MultimodalResponse dont les images sont dans
             # `.images` (pas une liste directe — d'où l'ancien bug

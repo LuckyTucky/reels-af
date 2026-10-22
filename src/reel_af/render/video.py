@@ -201,6 +201,7 @@ async def _gen_one(
     out_dir: Path,
     content_mode: str,
     art_style: str = "",
+    person_photo: str = "",
 ) -> BeatArtifact:
     """Pipeline for one beat: first frame → Veo i2v → BeatArtifact.
 
@@ -217,6 +218,7 @@ async def _gen_one(
             out_dir=out_dir,
             content_mode=content_mode,
             art_style=art_style,
+            person_photo=person_photo,
         )
     except Exception as e:
         # Repli 1 : un clip Envato de b-roll comme visuel du beat (mieux qu'une
@@ -269,11 +271,15 @@ async def generate_beat_videos(
     out_dir: Path,
     content_mode: str = "general",
     art_style: str = "",
+    person_photo: str = "",
 ) -> list[BeatArtifact]:
     """Generate one Veo clip per beat in parallel via asyncio.gather.
 
     Beats and visuals must be aligned by list index. Returns one
     ``BeatArtifact`` per beat with the final video_path populated.
+
+    ``person_photo`` (optionnel) : passé tel quel à CHAQUE beat — voir
+    render/images.generate_first_frame.
     """
     if len(beats) != len(visuals):
         raise ValueError(
@@ -284,7 +290,10 @@ async def generate_beat_videos(
     provider = OpenRouterProvider()
     artifacts = await asyncio.gather(
         *(
-            _gen_one(provider, beat, visual, out_dir, content_mode, art_style)
+            _gen_one(
+                provider, beat, visual, out_dir, content_mode, art_style,
+                person_photo,
+            )
             for beat, visual in zip(beats, visuals)
         )
     )

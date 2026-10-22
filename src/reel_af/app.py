@@ -357,6 +357,7 @@ async def generate_videos(
     content_mode: str,
     out_dir: str,
     art_style: str = "",
+    person_photo: str = "",
 ) -> dict:
     """Per-beat first-frame + Veo i2v (parallel fan-out).
 
@@ -367,6 +368,9 @@ async def generate_videos(
     ``art_style`` names a preset from ``render.images._ART_STYLE_PRESETS``
     (e.g. "style1") to override the default content_mode-based visual style
     for this reel only — no restart needed to A/B test different looks.
+    ``person_photo`` (optionnel, text_to_reel seulement) : id d'une photo
+    de la personne-sujet (bon-stock/person-refs/<id>.jpg) jointe en entrée
+    de CHAQUE beat — voir render/images.generate_first_frame.
     """
     from reel_af.models import Beat, BeatVisual
     from reel_af.render.video import generate_beat_videos
@@ -380,6 +384,7 @@ async def generate_videos(
         out_dir=media_dir,
         content_mode=content_mode,
         art_style=art_style,
+        person_photo=person_photo,
     )
     return {"artifacts": [a.model_dump(mode="json") for a in artifacts]}
 
@@ -613,6 +618,7 @@ async def text_to_reel(
     mode: str = "brute",
     lang: str = "",
     voice_preset: str = "",
+    person_photo: str = "",
 ) -> dict:
     """Turn pasted text into a vertical viral reel (no URL).
 
@@ -629,6 +635,12 @@ async def text_to_reel(
     vide = repli sur le choix par ton habituel. voice1 = voix actuellement
     en prod.
 
+    ``person_photo`` : id d'une photo de la personne-sujet du reel (voir
+    POST /api/reel-af/person-photo), jointe en entrée de CHAQUE beat pour
+    que le style choisi s'applique à SA photo plutôt qu'à un visage
+    inventé. Dépend du modèle/style — résultat pas garanti sur tous les
+    styles (voir render/images.generate_first_frame).
+
     Un seul reel se rend à la fois (verrou global _REEL_RENDER_LOCK).
 
     Example:
@@ -642,7 +654,7 @@ async def text_to_reel(
         return {"error": "text is required and cannot be empty."}
     async with _REEL_RENDER_LOCK:
         return await _text_to_reel_locked(
-            text, out_dir, art_style, mode, lang, voice_preset,
+            text, out_dir, art_style, mode, lang, voice_preset, person_photo,
         )
 
 
@@ -653,6 +665,7 @@ async def _text_to_reel_locked(
     mode: str = "brute",
     lang: str = "",
     voice_preset: str = "",
+    person_photo: str = "",
 ) -> dict:
     run_id = uuid.uuid4().hex[:8]
     out_path = (
@@ -722,6 +735,7 @@ async def _text_to_reel_locked(
         art_style=art_style,
         lang=lang,
         voice_preset=voice_preset,
+        person_photo=person_photo,
     )
 
     cost_report = cost_track.write(out_path, app.execution_cost)
@@ -934,6 +948,7 @@ async def _render_downstream(
     art_style: str = "",
     lang: str = "",
     voice_preset: str = "",
+    person_photo: str = "",
 ) -> dict:
     """audio → cards/beats (parallel) → visuals/accents (parallel) →
     videos → stitch. Used by both entry points."""
@@ -993,6 +1008,7 @@ async def _render_downstream(
         content_mode=essence["content_mode"],
         out_dir=str(out_path),
         art_style=art_style,
+        person_photo=person_photo,
     )
     timings["media"] = round(time.time() - t, 1)
 
@@ -1067,6 +1083,16 @@ _cast(Any, app).mount(
     "/styles-custom",
     StaticFiles(directory=str(_CUSTOM_STYLES_DIR)),
     name="styles-custom",
+)
+
+# Photo de la personne-sujet du reel (/texte, upload optionnel) — même
+# dossier que render/images._PERSON_REFS_DIR.
+_PERSON_REFS_DIR = _PROJECT_ROOT / "bon-stock" / "person-refs"
+_PERSON_REFS_DIR.mkdir(parents=True, exist_ok=True)
+_cast(Any, app).mount(
+    "/person-refs",
+    StaticFiles(directory=str(_PERSON_REFS_DIR)),
+    name="person-refs",
 )
 
 
@@ -1346,6 +1372,46 @@ async def _moodboard_upload(request: Request) -> JSONResponse:
 
 _cast(Any, app).add_api_route(
     "/api/reel-af/moodboard", _moodboard_upload, methods=["POST"],
+)
+
+
+async def _person_photo_upload(request: Request) -> JSONResponse:
+    """POST /api/reel-af/person-photo (multipart, champ `photo`) — UNE
+    photo de la personne-sujet du reel. Enregistrée dans
+    bon-stock/person-refs/<id>.jpg (monté en direct, persiste sans
+    reconstruction) ; l'id retourné se passe en `person_photo` à
+    text_to_reel, qui la joint en entrée (image-to-image) de CHAQUE beat —
+    voir render/images.generate_first_frame."""
+    import io
+
+    from PIL import Image as _PILImage, ImageOps as _ImageOps
+
+    form = await request.form()
+    upload = form.get("photo")
+    if not upload or not hasattr(upload, "filename") or not upload.filename:
+        return JSONResponse({"error": "Aucune photo reçue."}, status_code=422)
+
+    data = await upload.read()
+    if len(data) > 10 * 1024 * 1024:
+        return JSONResponse({"error": "Photo trop lourde — 10 Mo max."}, status_code=422)
+
+    try:
+        img = _PILImage.open(io.BytesIO(data))
+        img.verify()
+        img = _PILImage.open(io.BytesIO(data))  # verify() invalide l'objet
+        img = _ImageOps.exif_transpose(img).convert("RGB")
+    except Exception:  # noqa: BLE001
+        return JSONResponse(
+            {"error": "Fichier non reconnu comme image."}, status_code=422,
+        )
+
+    photo_id = uuid.uuid4().hex[:12]
+    img.save(str(_PERSON_REFS_DIR / f"{photo_id}.jpg"), format="JPEG", quality=92)
+    return JSONResponse({"id": photo_id, "url": f"/person-refs/{photo_id}.jpg"})
+
+
+_cast(Any, app).add_api_route(
+    "/api/reel-af/person-photo", _person_photo_upload, methods=["POST"],
 )
 
 

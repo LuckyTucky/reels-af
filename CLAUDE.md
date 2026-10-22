@@ -44,6 +44,8 @@ Entrée = URL d'article **ou** sujet → sortie = reel vertical avec sous-titres
 - **`http://localhost:8092/texte`** — « l'usine à reels » : page servie directement par l'agent reel-af (pas le control-plane, verrouillé/CORS strict — voir `CONSIGNE-CLAUDE-CODE-texte-vers-reel.md`). Colle un texte, choisis mode (brute/verbatim), langue, un ou plusieurs styles, une voix → `POST /api/reel-af/execute/reel_text_to_reel`, relayé côté serveur (proxy `aiohttp`, jamais de CORS) vers le control-plane. Styles et voix sont chargés dynamiquement via `GET /api/reel-af/presets` (source unique : `render/images.STYLE_UI_META` + `render/tts.VOICE_PRESETS`) — ajouter un style ou une voix ne touche jamais le HTML.
 - **Le moteur sérialise : UN seul reel rendu à la fois** (un `asyncio.Semaphore(1)` global dans `app.py`). Lancer plusieurs reels = ils font la file automatiquement. Plus de ralentissement parallèle, quelle que soit la méthode (terminal, bouton 🎬, script, page `/texte`).
 - Sortie : `output/article-<id>/reel.mp4` (ou `topic-<id>`, ou `text-<id>`).
+- **Mood board → style custom** (2026-10-22) : sous la grille de styles dans `/texte`, upload de 1-8 images (ou PDF — chaque image réellement intégrée est extraite, pas juste une capture de page) → `POST /api/reel-af/moodboard` distille un preset de style réutilisable (`bon-stock/styles-custom/<id>/`, un seul appel de vision) ; auto-sélectionné après création, bouton dédié « Produire avec ce style ». N'entre pas dans le verrou de rendu (appel court, indépendant).
+- **Photo de la personne-sujet** (2026-10-22) : champ optionnel sous le mood board — upload (`POST /api/reel-af/person-photo`) → l'id est joint en entrée (image-to-image) de **chaque beat** généré, pour que le style choisi s'applique à SA photo plutôt qu'à un visage inventé. Dépend du style/modèle : l'adhérence au style n'est pas garantie sur toutes les images (voir backlog).
 
 ## Le pipeline (`src/reel_af/`)
 
@@ -115,6 +117,15 @@ Retour arrière : `git checkout <tag>` puis reconstruire. Voir `ROLLBACK.md`.
 
 ## Backlog
 
+- **Adhérence au style pas garantie avec photo de la personne** (reprise 2026-10-22,
+  testé par Luc) : quand une photo de personne est jointe (image-to-image, voir
+  ci-dessus), certains beats ressortent dans le style demandé et d'autres gardent
+  un rendu plus proche de la photo d'origine — pas systématique, variable d'un
+  beat à l'autre sur le MÊME reel. Probablement l'adhérence du modèle d'image en
+  mode édition (moins obéissant qu'en génération pure texte→image). À creuser
+  après d'autres tests de Luc (styles/photos différents) avant de corriger —
+  pistes possibles : renforcer le prompt d'édition, réessayer un beat mal stylisé,
+  ou documenter que certains styles (très photo-réalistes) s'y prêtent mal.
 - ~~**Modèle de raisonnement périmé**~~ — fait (reprise 2026-10-20) : après des mois
   de pause, `anthropic/claude-sonnet-4` renvoyait 404 « No endpoints found » sur
   OpenRouter (modèle retiré). Corrigé : `.env` → `openrouter/anthropic/claude-sonnet-5.5`.
