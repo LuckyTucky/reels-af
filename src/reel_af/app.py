@@ -1172,10 +1172,75 @@ def _make_moodboard_thumb(images: list, dest: Path, width: int = 440) -> None:
     collage.save(str(dest), format="JPEG", quality=88)
 
 
+_MOODBOARD_MAX_REFS = 16
+_MOODBOARD_MAX_FILES = 8
+
+
+def _pdf_pages_to_images(data: bytes, dpi: int = 150, max_pages: int = _MOODBOARD_MAX_REFS) -> list:
+    """Repli : une image PIL par PAGE rendue (capture de page entière).
+
+    Utilisé seulement quand le PDF n'a AUCUNE image raster détectable par
+    _pdf_images (contenu vectoriel, ou une seule image de fond par page
+    déjà couverte par ce rendu) — sinon _pdf_images (ci-dessous) est
+    strictement plus fidèle : une image par PHOTO réelle, pas par page."""
+    import io
+
+    import pymupdf  # nom moderne — "fitz" est l'alias historique, déprécié
+    from PIL import Image as _PILImage
+
+    pages = []
+    doc = pymupdf.open(stream=data, filetype="pdf")
+    mat = pymupdf.Matrix(dpi / 72, dpi / 72)
+    for page in doc[:max_pages]:
+        pix = page.get_pixmap(matrix=mat)
+        pages.append(_PILImage.open(io.BytesIO(pix.tobytes("png"))).convert("RGB"))
+    return pages
+
+
+def _pdf_images(data: bytes, max_images: int = _MOODBOARD_MAX_REFS, min_px: int = 150) -> list:
+    """Extrait TOUTES les images raster réellement intégrées au PDF, peu
+    importe leur page ou leur position (un mood board a souvent plusieurs
+    photos par page, en grille/collage) — contrairement à une capture de
+    page qui noierait plusieurs photos distinctes dans UNE seule image
+    composite et perdrait tout ce qui dépasse la Nième page.
+
+    Déduplique par xref (même image réutilisée sur plusieurs pages) et
+    ignore les tout petits éléments (puces, icônes, logos de pied de page)
+    sous `min_px`. Repli sur un rendu de page si rien d'exploitable n'est
+    trouvé (PDF purement vectoriel, par ex.)."""
+    import io
+
+    import pymupdf
+    from PIL import Image as _PILImage
+
+    doc = pymupdf.open(stream=data, filetype="pdf")
+    seen_xrefs: set[int] = set()
+    images: list = []
+    for page in doc:
+        for img_info in page.get_images(full=True):
+            xref = img_info[0]
+            if xref in seen_xrefs:
+                continue
+            seen_xrefs.add(xref)
+            try:
+                extracted = doc.extract_image(xref)
+                img = _PILImage.open(io.BytesIO(extracted["image"])).convert("RGB")
+            except Exception:  # noqa: BLE001
+                continue
+            if img.width < min_px or img.height < min_px:
+                continue  # probablement une puce/icône/logo, pas une photo
+            images.append(img)
+            if len(images) >= max_images:
+                return images
+    return images or _pdf_pages_to_images(data, max_pages=max_images)
+
+
 async def _moodboard_upload(request: Request) -> JSONResponse:
     """POST /api/reel-af/moodboard (multipart) — `nom` (optionnel) + 1..8
-    `images` → distillation vision en UN preset de style réutilisable,
-    écrit dans bon-stock/styles-custom/<id>/ (persiste sans reconstruction).
+    fichiers `images` (JPEG/PNG/WEBP/… ou PDF — chaque image réellement
+    intégrée au PDF devient une référence, voir _pdf_images) →
+    distillation vision en UN preset de style réutilisable, écrit dans
+    bon-stock/styles-custom/<id>/ (persiste sans reconstruction).
 
     N'entre PAS dans _REEL_RENDER_LOCK : la distillation est un appel court
     et indépendant d'un rendu de reel — elle n'a pas à attendre son tour
@@ -1188,32 +1253,53 @@ async def _moodboard_upload(request: Request) -> JSONResponse:
     nom_hint = str(form.get("nom") or "").strip()
     uploads = [v for v in form.getlist("images") if hasattr(v, "filename") and v.filename]
     if not uploads:
-        return JSONResponse({"error": "Aucune image reçue."}, status_code=422)
-    if len(uploads) > 8:
-        return JSONResponse({"error": "8 images maximum."}, status_code=422)
+        return JSONResponse({"error": "Aucun fichier reçu."}, status_code=422)
+    if len(uploads) > _MOODBOARD_MAX_FILES:
+        return JSONResponse(
+            {"error": f"{_MOODBOARD_MAX_FILES} fichiers maximum."}, status_code=422,
+        )
 
     max_bytes = 10 * 1024 * 1024
-    raw_images: list[bytes] = []
+    raw_uploads: list[tuple[str, bytes]] = []
     for up in uploads:
         data = await up.read()
         if len(data) > max_bytes:
             return JSONResponse(
-                {"error": f"Image trop lourde ({up.filename}) — 10 Mo max."},
+                {"error": f"Fichier trop lourd ({up.filename}) — 10 Mo max."},
                 status_code=422,
             )
-        raw_images.append(data)
+        raw_uploads.append((up.filename or "", data))
 
     pil_images = []
-    for data in raw_images:
+    truncated = False
+    for i, (filename, data) in enumerate(raw_uploads):
+        is_pdf = filename.lower().endswith(".pdf") or data[:4] == b"%PDF"
         try:
-            img = _PILImage.open(io.BytesIO(data))
-            img.verify()
-            img = _PILImage.open(io.BytesIO(data))  # verify() invalide l'objet
-            pil_images.append(_ImageOps.exif_transpose(img).convert("RGB"))
+            if is_pdf:
+                remaining = _MOODBOARD_MAX_REFS - len(pil_images)
+                found = _pdf_images(data, max_images=remaining + 1)  # +1 pour détecter le dépassement
+                truncated = truncated or len(found) > remaining
+                pil_images.extend(found[:remaining])
+            else:
+                img = _PILImage.open(io.BytesIO(data))
+                img.verify()
+                img = _PILImage.open(io.BytesIO(data))  # verify() invalide l'objet
+                pil_images.append(_ImageOps.exif_transpose(img).convert("RGB"))
         except Exception:  # noqa: BLE001
             return JSONResponse(
-                {"error": "Fichier non reconnu comme image."}, status_code=422,
+                {"error": f"Fichier non reconnu comme image ou PDF ({filename})."},
+                status_code=422,
             )
+        if len(pil_images) >= _MOODBOARD_MAX_REFS:
+            truncated = truncated or i + 1 < len(raw_uploads)
+            break
+
+    if not pil_images:
+        return JSONResponse(
+            {"error": "Aucune image exploitable (PDF vide ou purement vectoriel ?)."},
+            status_code=422,
+        )
+    pil_images = pil_images[:_MOODBOARD_MAX_REFS]
 
     slug = re.sub(r"[^a-z0-9]+", "-", nom_hint.lower()).strip("-")[:24]
     style_id = f"mb-{slug or uuid.uuid4().hex[:6]}-{uuid.uuid4().hex[:4]}"
@@ -1250,7 +1336,12 @@ async def _moodboard_upload(request: Request) -> JSONResponse:
     (style_dir / "preset.json").write_text(
         json.dumps(preset, ensure_ascii=False, indent=2), encoding="utf-8",
     )
-    return JSONResponse({**preset, "thumb": f"/styles-custom/{style_id}/thumb.jpg"})
+    return JSONResponse({
+        **preset,
+        "thumb": f"/styles-custom/{style_id}/thumb.jpg",
+        "refs_used": len(pil_images),
+        "truncated": truncated,
+    })
 
 
 _cast(Any, app).add_api_route(

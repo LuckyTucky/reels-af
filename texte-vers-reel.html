@@ -116,9 +116,10 @@
       <label class="fld">+ Nouveau style depuis un mood board</label>
       <div class="mb-upload">
         <input type="text" id="mb-nom" placeholder="Nom du style (optionnel)">
-        <input type="file" id="mb-files" multiple accept="image/*">
+        <input type="file" id="mb-files" multiple accept="image/*,.pdf,application/pdf">
         <button id="mb-go" type="button">Distiller le style</button>
       </div>
+      <p class="hint">Images (JPEG, PNG, WEBP…) ou PDF — max 8 fichiers, toutes les photos intégrées dans un PDF sont analysées (jusqu'à 16 au total).</p>
       <p class="hint" id="mb-status"></p>
     </div>
 
@@ -224,10 +225,24 @@ document.getElementById('mb-go').onclick = async () => {
     const r = await fetch('/api/reel-af/moodboard', { method: 'POST', body: fd });
     const data = await r.json().catch(() => ({}));
     if(!r.ok) throw new Error(data.error || `échec (${r.status})`);
-    status.textContent = `Style « ${data.nom} » créé ✓ — sélectionnable dans la grille ci-dessus.`;
+    const trunc = data.truncated ? ' (certaines images n\'ont pas été retenues — limite atteinte)' : '';
+    // Auto-sélectionne le style tout juste créé — sinon le bouton principal
+    // retombe sur "style par défaut" (aucune sélection) juste après une
+    // distillation, ce qui surprend : on vient de créer CE style, c'est
+    // forcément lui qu'on veut produire.
+    selected.add(data.id);
+    await loadPresets();
+    refresh();
+    status.innerHTML =
+      `Style « ${data.nom} » créé et sélectionné ✓ (${data.refs_used} image${data.refs_used>1?'s':''} analysée${data.refs_used>1?'s':''}${trunc}). ` +
+      `<button type="button" id="mb-produce" style="margin-left:6px">🎬 Produire avec ce style</button>`;
+    document.getElementById('mb-produce').onclick = async () => {
+      if(txt.value.trim().length < 10){ status.append(' — texte trop court.'); return; }
+      const log = document.getElementById('log');
+      await launchStyle(data.id, log);
+    };
     document.getElementById('mb-files').value = '';
     document.getElementById('mb-nom').value = '';
-    await loadPresets();
   }catch(err){
     status.innerHTML = `<span class="warn">Échec</span> — ${err.message}`;
   }finally{
@@ -255,29 +270,38 @@ function refresh(){
   go.textContent = c ? `Faire ${c} reel${c>1?'s':''}` : 'Faire le reel (style par défaut)';
 }
 
+// Lance UN reel pour un style donné et pousse une ligne dans le journal
+// passé (#log par défaut) — factorisé pour être réutilisé par le bouton
+// principal (une ligne par style sélectionné) ET par le bouton dédié
+// "Produire avec ce style" du bloc mood board (une seule ligne, ce style).
+async function launchStyle(art_style, log){
+  const text = txt.value.trim();
+  const mode = document.querySelector('input[name=mode]:checked').value;
+  const line = document.createElement('div');
+  line.className = 'l';
+  line.textContent = `Envoi… ${art_style || 'style par défaut'}`;
+  log.appendChild(line);
+  try{
+    const r = await fetch('/api/reel-af/execute/reel_text_to_reel', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ input:{ text, art_style, mode, lang, voice_preset: voicePreset } })
+    });
+    const data = await r.json().catch(()=>({}));
+    const id = data.execution_id || data.id || '';
+    line.innerHTML = `Lancé — ${art_style || 'défaut'} ${id?('· <code>'+id+'</code>'):''} · suivi : <a href="http://localhost:8090/ui/" target="_blank">http://localhost:8090/ui/</a>`;
+  }catch(err){
+    line.innerHTML = `<span class="warn">Échec ${art_style||'défaut'}</span> — vérifie que le moteur (reel-af, port 8092) tourne.`;
+  }
+}
+
 document.getElementById('go').onclick = async () => {
   const text = txt.value.trim();
   if(text.length < 10) return;
-  const mode = document.querySelector('input[name=mode]:checked').value;
   const styles = selected.size ? [...selected] : [''];
   const log = document.getElementById('log');
   log.innerHTML = '';
   for(const art_style of styles){
-    const line = document.createElement('div');
-    line.className = 'l';
-    line.textContent = `Envoi… ${art_style || 'style par défaut'}`;
-    log.appendChild(line);
-    try{
-      const r = await fetch('/api/reel-af/execute/reel_text_to_reel', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ input:{ text, art_style, mode, lang, voice_preset: voicePreset } })
-      });
-      const data = await r.json().catch(()=>({}));
-      const id = data.execution_id || data.id || '';
-      line.innerHTML = `Lancé — ${art_style || 'défaut'} ${id?('· <code>'+id+'</code>'):''} · suivi : <a href="http://localhost:8090/ui/" target="_blank">http://localhost:8090/ui/</a>`;
-    }catch(err){
-      line.innerHTML = `<span class="warn">Échec ${art_style||'défaut'}</span> — vérifie que le moteur (reel-af, port 8092) tourne.`;
-    }
+    await launchStyle(art_style, log);
   }
 };
 refresh();
